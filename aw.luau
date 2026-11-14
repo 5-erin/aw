@@ -121,6 +121,9 @@ end
 
 let f_hello = f_id("hello")
 
+let f_idinstantiated: (number) -> number = f_id
+let f_num = f_idinstantiated(5)
+
 let g_sets: (string | number) & number = 5
 let g_union: number | boolean = true
 

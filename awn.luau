@@ -771,7 +771,9 @@ local function normalizedString(singleton: string?)
     return n
 end
 
-local function applyBoundsChanges(changes: { read RequiredBoundsChange })
+local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Type }
+    local erroneousSet = {}
+
     for _, change in changes do
         assert(change.Target.Kind == "Free")
 
@@ -785,9 +787,16 @@ local function applyBoundsChanges(changes: { read RequiredBoundsChange })
         local consistencyResult = isSubtypeOf(normalize(change.Target.LowerBound), normalize(change.Target.UpperBound))
 
         if not consistencyResult.Holds then
-            print(`Internal error: { typeToString(change.Target) } has incompatible bounds: { typeToString(simplify(change.Target.LowerBound)) } </: { typeToString(simplify(change.Target.UpperBound)) }`)
+            erroneousSet[change.Target] = true
         end
     end
+
+    local erroneous = {}
+    for failed, _ in erroneousSet do
+        table.insert(erroneous, failed)
+    end
+
+    return erroneous
 end
 
 local function intersectApplicableReturns(components: { NormalizedFunctionComponentType }, argument: NormalizedType): NormalizedType?
@@ -852,6 +861,29 @@ local function decomposeToSingletons(n: NormalizedType): { NormalizedType }?
 end
 
 local normalizationToString
+local substituteAllIn
+local instantiateGenericsAtCallsite
+
+local function normalizedFunctionComponentToString(nfc: NormalizedFunctionComponentType): string
+    local gensStrings = table.create<<string>>(#nfc.Generics)
+    local paramStrings = table.create<<string>>(#nfc.Parameters)
+
+    for i, gen in nfc.Generics do
+        gensStrings[i] = typeToString(gen)
+    end
+
+    for i, param in nfc.Parameters do
+        paramStrings[i] = normalizationToString(param)
+    end
+
+    local str = `({ table.concat(paramStrings, ", ") }) -> { if nfc.Return then normalizationToString(nfc.Return) else "()" }`
+
+    if #nfc.Generics > 0 then
+        str = `<{ table.concat(gensStrings, ", ") }>` .. str
+    end
+
+    return str
+end
 
 local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionType): SubtypingResult
     -- `((A) -> B) & ((C) -> D) & ... <: function`
@@ -896,13 +928,7 @@ local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunct
             local failed = {}
 
             for ica, ca in a.Components do
-                local paramStrings = table.create<<string>>(#ca.Parameters)
-
-                for i, param in ca.Parameters do
-                    paramStrings[i] = normalizationToString(param)
-                end
-
-                local signature = `({ table.concat(paramStrings, ", ") }) -> { if ca.Return then normalizationToString(ca.Return) else "()" }`
+                local signature = normalizedFunctionComponentToString(ca)
 
                 if #ca.Parameters ~= #cb.Parameters then
                     table.insert(failed, `'{ signature }' has a differing number of parameters.`)
@@ -910,6 +936,53 @@ local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunct
                 end
 
                 local paramsMatched = true
+                local instantiate = #ca.Generics > 0
+                local nonInstantiated = signature
+                local instantiationFailed = false
+
+                if instantiate then
+                    local caNorm = normalizedNever()
+                    local cbNorm = normalizedNever()
+                    caNorm.Function = { Components = { ca } }
+                    cbNorm.Function = { Components = { cb } }
+
+                    local aFn = normalizationToType(caNorm)
+                    local bFn = normalizationToType(cbNorm)
+
+                    local gensToSubstitute = {}
+                    local ftyToGeneric = {}
+                    assert(aFn.Kind == "Function")
+
+                    for _, gen in aFn.Generics do
+                        local free = freeType()
+                        gensToSubstitute[gen] = free
+                        ftyToGeneric[free] = gen
+                    end
+
+                    aFn = functionType({}, aFn.Parameters, aFn.Variadic, aFn.Returns)
+                    aFn = substituteAllIn(aFn, gensToSubstitute, {})
+
+                    local instantiated, erroneous = instantiateGenericsAtCallsite(aFn, bFn)
+
+                    for _, free in erroneous do
+                        local gen = ftyToGeneric[free]
+                        assert(gen)
+                        assert(free.Kind == "Free")
+
+                        table.insert(failed, `'{ typeToString(gen) }' was required to be a subtype of '{ typeToString(free.UpperBound) }' while being called with '{ typeToString(free.LowerBound) }'.`)
+                        instantiationFailed = true
+                    end
+
+                    local instantiatedNorm = normalize(instantiated)
+                    assert(instantiatedNorm.Function and instantiatedNorm.Function.Components and #instantiatedNorm.Function.Components > 0)
+
+                    ca = instantiatedNorm.Function.Components[1]
+                    signature = normalizedFunctionComponentToString(ca)
+                end
+
+                if instantiationFailed then
+                    continue
+                end
 
                 for i, param in ca.Parameters do
                     local paramResult = isSupertypeOf(param, cb.Parameters[i])
@@ -919,10 +992,9 @@ local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunct
                     else
                         table.insert(
                             failed,
-                            `'{ signature }' does not accept parameter #{ i } '{ normalizationToString(cb.Parameters[i]) }': { paramResult.FailedPath }`
+                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not accept parameter #{ i } '{ normalizationToString(cb.Parameters[i]) }': { paramResult.FailedPath }`
                         )
                         paramsMatched = false
-                        continue
                     end
                 end
 
@@ -938,7 +1010,7 @@ local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunct
                     else
                         table.insert(
                             failed,
-                            `'{ signature }' does not return '{ normalizationToString(cb.Return) }'.`
+                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not return '{ normalizationToString(cb.Return) }'.`
                         )
                         continue
                     end
@@ -957,7 +1029,11 @@ local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunct
 
                 local signature = `({ table.concat(paramStrings, ", ") }) -> { if cb.Return then normalizationToString(cb.Return) else "()" }`
 
-                return subtypeFailure(`No compatible overload was found for #{ i } '{ signature }':\n* { table.concat(failed, "\n* ") }`)
+                if #b.Components > 1 then
+                    return subtypeFailure(`No compatible overload was found for #{ i } '{ signature }':\n* { table.concat(failed, "\n* ") }`)
+                else
+                    return subtypeFailure(`\n* { table.concat(failed, "\n* ") }`)
+                end
             end
         end
     end
@@ -1468,25 +1544,40 @@ local typeAnnotationToType
 local check
 
 -- `Sub <: Super`. Can modify bounds of either if either are Free.
-local function subtypingRelation(state: InferenceState, sub: Type, super: Type)
+-- Returns the list of free types with erroneous bounds, if there were any.
+local function subtypingRelation(sub: Type, super: Type): { Type }
     if logInference then
-        print(`Constraining '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
+        print(`Relation: '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
     end
 
     local result = isSubtypeOf(normalize(sub), normalize(super))
 
     if result.Holds then
-        applyBoundsChanges(result.RequiredBoundsChanges)
+        return applyBoundsChanges(result.RequiredBoundsChanges)
+    else
+        return {}
     end
 end
 
 -- `subtypingRelation`, but report error if relation does not hold.
 local function constrainSubtype(state: InferenceState, position: caw.Position, sub: Type, super: Type)
-    subtypingRelation(state, sub, super)
-    check(sub, super, position)
-end
+    if logInference then
+        print(`{ position.Line }:{ position.Column }: Constraining:`)
+    end
 
-local substituteAllIn
+    local erroneous = subtypingRelation(sub, super)
+
+    for _, free in erroneous do
+        assert(free.Kind == "Free")
+        print(`Internal error: { typeToString(free) } has incompatible bounds: { typeToString(simplify(free.LowerBound)) } </: { typeToString(simplify(free.UpperBound)) }`)
+    end
+
+    check(sub, super, position)
+
+    if logInference then
+        print("")
+    end
+end
 
 local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, traversed: { [Type]: true }): Type
     if ty.Kind == "error" or ty.Kind == "never" or ty.Kind == "unknown"
@@ -1703,7 +1794,6 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
 end
 
 type InferenceState = {
-    Generics: { [Type]: true | nil },
     -- `true` = We're inferring a return type, but we haven't come across a `return` yet.
     -- `false`= Function is explicitly annotated as returning no value.
     -- `Type` = `FreeType`: We're currently inferring a return type.
@@ -1712,14 +1802,8 @@ type InferenceState = {
     Variadic: Type?,
 }
 
-function instantiateGenericsAtCallsite(state: InferenceState, fn: Type, callsite: Type)
-    subtypingRelation(state, fn, callsite)
-
-    if fn.Kind == "Function" then
-        for _, gen in fn.Generics do
-            state.Generics[gen] = nil
-        end
-    end
+function instantiateGenericsAtCallsite(fn: Type, callsite: Type)
+    local erroneous = subtypingRelation(fn, callsite)
 
     local substitutions: GatherFreeTypeSubstitutionsState = {
         Substitutions = {},
@@ -1740,7 +1824,7 @@ function instantiateGenericsAtCallsite(state: InferenceState, fn: Type, callsite
     end
 
     assert(#newGens == 0)
-    return substituteAllIn(fn, substitutions.Substitutions, {})
+    return substituteAllIn(fn, substitutions.Substitutions, {}), erroneous
 end
 
 local function infer(state: InferenceState, expr: caw.Expression, expected: Type?): Type?
@@ -1797,7 +1881,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         return listType(itemsTy)
 
     elseif expr.Type == "ReadIndex" then
-        local itemsTy = expected or freeType()
+        local itemsTy = freeType()
 
         local listTy = infer(state, expr.List, listType(itemsTy)) or errorReport(`Tried to index an expression that returned no value.`, expr.List.Position)
         local indexTy = infer(state, expr.Index, primitiveType("number")) or errorReport(`Index was an expression that returned no value.`, expr.Index.Position)
@@ -2046,7 +2130,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         }
 
         if logInference then
-            print(`Eliminating free types: { typeToString(functionType(gens, params, varTy or neverType(), if typeof(retTy) == "table" then retTy else nil)) }`)
+            print(`{ expr.Position.Line }:{ expr.Position.Column }: Eliminating free types: { typeToString(functionType(gens, params, varTy or neverType(), if typeof(retTy) == "table" then retTy else nil)) }`)
         end
 
         -- Inputs are negative.
@@ -2076,7 +2160,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         if logInference then
             print("Free type substitutions:")
             for fty, ty in freeTypeSubstitutions.Substitutions do
-                print(`* { typeToString(fty) } => { typeToString(ty) }`)
+                print(`* { typeToString(fty) } => { typeToString(ty) }{ if table.find(freeTypeSubstitutions.Generics, ty) then " (introduced generic)" else "" }`)
             end
             print("")
         end
@@ -2108,6 +2192,17 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
         table.move(freeTypeSubstitutions.Generics, 1, #freeTypeSubstitutions.Generics, #gens + 1, gens)
+
+        -- Trim unused generics, e.g. `let x = function(f, y) return f(y) end`.
+        local gensCheck = table.clone(gens)
+        table.clear(gens)
+
+        for _, gen in gensCheck do
+            if traversed[gen] then
+                table.insert(gens, gen)
+            end
+        end
+
         local fty = functionType(gens, params, varTy, if typeof(retTy) == "table" then retTy else nil)
 
         if expr.Function.Name then
@@ -2185,8 +2280,6 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             local gensToSubstitute = {}
 
             for _, gen in fnTy.Generics do
-                state.Generics[gen] = true
-
                 local free = freeType()
                 gensToSubstitute[gen] = free
 
@@ -2209,7 +2302,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
         local callsiteTy = functionType({}, arguments, neverType(), expected)
-        fnTy = instantiateGenericsAtCallsite(state, fnTy, callsiteTy)
+        fnTy = instantiateGenericsAtCallsite(fnTy, callsiteTy)
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
 
@@ -2402,8 +2495,9 @@ local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: Normaliz
         err ..= `(aka '{ nas }') `
     end
 
-    err ..= "is not "
+    err ..= "is not a subtype of "
 
+    --[[
     if result.Variance == "Covariant" then
         err ..= "a subtype of "
     elseif result.Variance == "Contravariant" then
@@ -2411,6 +2505,7 @@ local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: Normaliz
     else
         err ..= "exactly "
     end
+    ]]--
 
     local bs = typeToString(b)
     local nbs = normalizationToString(nb)
@@ -2530,7 +2625,6 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     logInference = options.LogInference
 
     local state: InferenceState = {
-        Generics = {},
         ReturnType = nil,
     }
 

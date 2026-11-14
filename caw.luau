@@ -45,22 +45,38 @@ export type LiteralValue =
         read Value: string,
       }
 
-type BasicToken = {
-    read Type:
-        | "OpenParentheses"  | "CloseParentheses"
-        | "OpenCurlyBraces"  | "CloseCurlyBraces"
-        | "OpenSquareBraces" | "CloseSquareBraces"
-        | "Comma"
-        | "Colon"
-        | "Pipe"
-        | "Ampersand"
-        | "Arrow"
-        | "Tilde"
-        | "Ellipsis"
-        | "EndOfFile",
-}
-
 type Keyword = "nil" | "true" | "false" | "let" | "type" | "function" | "return" | "end" | "if" | "else" | "then"
+
+local symbols = {
+    ["("] = true,
+    [")"] = true,
+    ["{"] = true,
+    ["}"] = true,
+    ["["] = true,
+    ["]"] = true,
+    [","] = true,
+    [":"] = true,
+    ["|"] = true,
+    ["&"] = true,
+    ["->"] = true,
+    ["~"] = true,
+    ["..."] = true,
+    ["#"] = true,
+    ["^"] = true,
+    ["+"] = true,
+    ["-"] = true,
+    ["*"] = true,
+    ["/"] = true,
+    ["//"] = true,
+    [".."] = true,
+    ["=="] = true,
+    ["~="] = true,
+    [">"] = true,
+    [">="] = true,
+    ["<"] = true,
+    ["<="] = true,
+    ["="] = true,
+}
 
 local operators = {
     ["+"] = true,
@@ -78,32 +94,35 @@ local operators = {
     ["="] = true,
 }
 
-type Operator = keyof<typeof(operators)>
+type KeywordToken = {
+    read Type: "Keyword",
+    read Keyword: Keyword,
+}
 
-type OperatorToken = {
-    read Type: "Operator",
-    read Operator: Operator,
+type IdentifierToken = {
+    read Type: "Identifier",
+    read Identifier: string,
+}
+
+type LiteralToken = {
+    read Type: "Literal",
+    read Literal: LiteralValue,
+}
+
+type SymbolToken = {
+    read Type: keyof<typeof(symbols)>,
+}
+
+type EndOfFileToken = {
+    read Type: "EndOfFile",
 }
 
 type TokenData =
-    | {
-        read Type: "Keyword",
-        read Keyword: Keyword,
-      }
-    | {
-        read Type: "Identifier",
-        read Identifier: string,
-      }
-    | {
-        read Type: "Literal",
-        read Literal: LiteralValue,
-      }
-    | {
-        read Type: "InvalidSyntax",
-        read Token: string,
-      }
-    | OperatorToken
-    | BasicToken
+    | KeywordToken
+    | IdentifierToken
+    | LiteralToken
+    | SymbolToken
+    | EndOfFileToken
 
 export type Position = { Line: number, Column: number, Offset: number }
 type Token = TokenData & { Position: Position }
@@ -214,7 +233,7 @@ type ExpressionData =
       }
     | {
         read Type: "BinaryOperation",
-        read Operator: Operator,
+        read Operator: keyof<typeof(operators)>,
         read Left: Expression,
         read Right: Expression,
       }
@@ -297,24 +316,6 @@ local keywords: { read [string]: Keyword? } = {
     ["end"] = "end",
 }
 
--- TODO luau
-local correspond: { read [string]: index<BasicToken, "Type">? } = {
-    ["("] = "OpenParentheses",
-    [")"] = "CloseParentheses",
-    ["{"] = "OpenCurlyBraces",
-    ["}"] = "CloseCurlyBraces",
-    ["["] = "OpenSquareBraces",
-    ["]"] = "CloseSquareBraces",
-    [","] = "Comma",
-    [":"] = "Colon",
-    ["|"] = "Pipe",
-    ["&"] = "Ampersand",
-    ["->"] = "Arrow",
-    ["~"] = "Tilde",
-    ["..."] = "Ellipsis",
-    [""] = "EndOfFile",
-}
-
 local function unreachable(x: never): never
     error(`Unexpected branch with value '{ x }' ({ typeof(x) }), this is an internal error.`)
 end
@@ -344,10 +345,7 @@ local function isEof(c: string)
 end
 
 local function isSeparator(c: string)
-    return isEof(c) or isWhitespace(c) or c == ":" or c == ";" or c == "(" or c == ")" or c == "{" or c == "}" or c == "," or c == "^" or c == '"' or c == "#"
-        or c == "[" or c == "]"
-        or c == "->" or c == "~"
-        or operators[c]
+    return isEof(c) or isWhitespace(c) or c == ";" or c == '"' or symbols[c]
 end
 
 local function nextToken(state: ParseState): Token
@@ -429,9 +427,9 @@ local function nextToken(state: ParseState): Token
 
         while nextC ~= '"' do
             if isEof(nextC) then
+                state.Report("Incomplete string", state)
                 return tk{
-                    Type = "InvalidSyntax",
-                    Token = '"' .. strlit,
+                    Type = "EndOfFile",
                 }
             end
 
@@ -446,15 +444,9 @@ local function nextToken(state: ParseState): Token
                 Value = strlit,
             },
         }
-    elseif operators[token :: Operator] or token == "#" then -- TODO luau cast (also not accurate)
+    elseif symbols[token] then -- TODO luau cast (also not accurate)
         return tk{
-            Type = "Operator",
-            Operator = token :: Operator,
-        }
-    elseif correspond[token] then
-        return tk{
-            -- TODO luau
-            Type = assert(correspond[token])
+            Type = token :: keyof<typeof(symbols)>
         }
     elseif string.match(nextCharacter(token, 1), "%a") or (string.byte(nextCharacter(token, 1)) and string.byte(nextCharacter(token, 1)) > 127) then
         if keywords[token] then
@@ -470,9 +462,12 @@ local function nextToken(state: ParseState): Token
         end
     end
 
+    if #token > 0 then
+        state.Report(`Invalid syntax '{ token }'`, state)
+    end
+
     return tk{
-        Type = "InvalidSyntax",
-        Token = token,
+        Type = "EndOfFile",
     }
 end
 
@@ -488,7 +483,7 @@ end
 local function consumeOptionalComma(state: ParseState)
     local next, consume = peekNextToken(state)
 
-    if next.Type == "Comma" then
+    if next.Type == "," then
         consume()
     end
 end
@@ -497,9 +492,8 @@ type ParseState = {
     Program: string,
     Position: Position,
     FunctionDepth: number,
+    Report: (string, { Position: Position }) -> (),
 }
-
-type Report = (string, { Position: Position }) -> ()
 
 local function ex(expr: ExpressionData, t: { Position: Position }): Expression
     local x: Expression = expr :: Expression
@@ -508,9 +502,9 @@ local function ex(expr: ExpressionData, t: { Position: Position }): Expression
     return x
 end
 
-local function invalidExpr(state, msg, report): Expression
+local function invalidExpr(state, msg): Expression
     local withPos = { Position = table.clone(state.Position) }
-    report(msg, withPos)
+    state.Report(msg, withPos)
 
     return ex({
         Type = "InvalidSyntax",
@@ -521,37 +515,37 @@ end
 local parseTypeAnnotation
 local maybeCombineWithTypeOperator
 
-local function parseBinaryTypeOperator(state: ParseState, report: Report, left: TypeAnnotation, opTk: Token): TypeAnnotation
+local function parseBinaryTypeOperator(state: ParseState, left: TypeAnnotation, opTk: Token): TypeAnnotation
     local combined: TypeAnnotation = {
         -- TODO luau false positive type error when this is `"Union" | "Intersection"`
-        Kind = if opTk.Type == "Pipe" then "Union" else "Intersection" :: "Union",
-        Components = { left, parseTypeAnnotation(state, report) },
+        Kind = if opTk.Type == "|" then "Union" else "Intersection" :: "Union",
+        Components = { left, parseTypeAnnotation(state) },
     }
 
-    return maybeCombineWithTypeOperator(state, report, combined)
+    return maybeCombineWithTypeOperator(state, combined)
 end
 
-function maybeCombineWithTypeOperator(state: ParseState, report: Report, left: TypeAnnotation): TypeAnnotation
+function maybeCombineWithTypeOperator(state: ParseState, left: TypeAnnotation): TypeAnnotation
     local maybeOperator, consumeOperator = peekNextToken(state)
 
-    if maybeOperator.Type == "Pipe" or maybeOperator.Type == "Ampersand" then
+    if maybeOperator.Type == "|" or maybeOperator.Type == "&" then
         consumeOperator()
         -- TODO luau type error on `maybeOperator`
-        return parseBinaryTypeOperator(state, report, left, maybeOperator)
+        return parseBinaryTypeOperator(state, left, maybeOperator)
     else
         return left
     end
 end
 
-local function parseGenericParameterList(state: ParseState, report: Report): { read GenericTypeAnnotation }
+local function parseGenericParameterList(state: ParseState): { read GenericTypeAnnotation }
     local maybeCloser, consumeCloser = peekNextToken(state)
     local gens = {}
 
-    while maybeCloser.Type ~= "Operator" or maybeCloser.Operator ~= ">" do
+    while maybeCloser.Type ~= ">" do
         local gen = nextToken(state)
 
         if gen.Type ~= "Identifier" then
-            report(`Expected generic name, got { gen.Type } instead.`, gen)
+            state.Report(`Expected generic name, got { gen.Type } instead.`, gen)
             break
         end
 
@@ -565,21 +559,21 @@ local function parseGenericParameterList(state: ParseState, report: Report): { r
     return gens
 end
 
-function parseTypeAnnotation(state: ParseState, report: Report, shallow: boolean?): TypeAnnotation
+function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotation
     local annotation = nextToken(state)
     local ty: TypeAnnotation? = nil
 
     if annotation.Type == "Identifier" then
         local maybeInstantiation, consumeOpenInstantion = peekNextToken(state)
 
-        if maybeInstantiation.Type == "Operator" and maybeInstantiation.Operator == "<" then
+        if maybeInstantiation.Type == "<" then
             consumeOpenInstantion()
 
             local closeInstantiation, consumeCloseInstantiation = peekNextToken(state)
             local typeArguments: { TypeAnnotation } = {}
 
-            while closeInstantiation.Type ~= "Operator" or closeInstantiation.Operator ~= ">" do
-                table.insert(typeArguments, parseTypeAnnotation(state, report))
+            while closeInstantiation.Type ~= ">" do
+                table.insert(typeArguments, parseTypeAnnotation(state))
 
                 consumeOptionalComma(state)
                 closeInstantiation, consumeCloseInstantiation = peekNextToken(state)
@@ -611,7 +605,7 @@ function parseTypeAnnotation(state: ParseState, report: Report, shallow: boolean
                 Value = annotation.Keyword == "true",
             }
         else
-            report(`Invalid annotation keyword '{ annotation.Keyword }'.`, annotation)
+            state.Report(`Invalid annotation keyword '{ annotation.Keyword }'.`, annotation)
         end
     elseif annotation.Type == "Literal" then
         if annotation.Literal.Type == "string" or annotation.Literal.Type == "boolean" then
@@ -620,17 +614,17 @@ function parseTypeAnnotation(state: ParseState, report: Report, shallow: boolean
                 Value = annotation.Literal.Value,
             }
         else
-            report(`{ annotation.Literal.Type } singletons are not supported.`, annotation)
+            state.Report(`{ annotation.Literal.Type } singletons are not supported.`, annotation)
         end
-    elseif annotation.Type == "Tilde" then
+    elseif annotation.Type == "~" then
         ty = {
             Kind = "Negation",
-            Negated = parseTypeAnnotation(state, report, true),
+            Negated = parseTypeAnnotation(state, true),
         }
-    elseif annotation.Type == "Operator" and annotation.Operator == "<" then
-        local gens = parseGenericParameterList(state, report)
+    elseif annotation.Type == "<" then
+        local gens = parseGenericParameterList(state)
         local next = peekNextToken(state)
-        local func = parseTypeAnnotation(state, report)
+        local func = parseTypeAnnotation(state)
 
         if func.Kind == "Function" then
             ty = {
@@ -640,19 +634,19 @@ function parseTypeAnnotation(state: ParseState, report: Report, shallow: boolean
                 Returns = func.Returns,
             }
         else
-           report(`Expected function type to follow generic parameter list, got { func.Kind } instead.`, next)
+           state.Report(`Expected function type to follow generic parameter list, got { func.Kind } instead.`, next)
         end
 
-    elseif annotation.Type == "OpenParentheses" then
+    elseif annotation.Type == "(" then
         local params = {}
         local definitelyFunction = false
         local parens, consumeParens = peekNextToken(state)
 
-        while parens.Type ~= "CloseParentheses" do
-            table.insert(params, parseTypeAnnotation(state, report))
+        while parens.Type ~= ")" do
+            table.insert(params, parseTypeAnnotation(state))
             parens, consumeParens = peekNextToken(state)
 
-            if parens.Type == "Comma" then
+            if parens.Type == "," then
                 definitelyFunction = true
                 consumeParens()
                 parens, consumeParens = peekNextToken(state)
@@ -662,10 +656,10 @@ function parseTypeAnnotation(state: ParseState, report: Report, shallow: boolean
         consumeParens()
         local maybeArrow, consumeArrow = peekNextToken(state)
 
-        if maybeArrow.Type == "Arrow" then
+        if maybeArrow.Type == "->" then
             consumeArrow()
 
-            local returns = parseTypeAnnotation(state, report)
+            local returns = parseTypeAnnotation(state)
 
             if returns.Kind == "Unit" then
                 returns = nil
@@ -679,17 +673,17 @@ function parseTypeAnnotation(state: ParseState, report: Report, shallow: boolean
             }
         -- `(T, U)` is not a valid annotation,
         elseif definitelyFunction then
-            report(`Expected '->' for function type, got { maybeArrow.Type } instead.`, maybeArrow)
+            state.Report(`Expected '->' for function type, got { maybeArrow.Type } instead.`, maybeArrow)
         -- ... but `(T)` is.
         else
-            ty = params[1] or { Kind = "Unit" }
+            ty = params[1] or { Kind = "Unit" :: "Unit" }
         end
-    elseif annotation.Type == "OpenCurlyBraces" then
-        local itemTy = parseTypeAnnotation(state, report)
+    elseif annotation.Type == "{" then
+        local itemTy = parseTypeAnnotation(state)
         local closeCurly = nextToken(state)
 
-        if closeCurly.Type ~= "CloseCurlyBraces" then
-            report(`Expected '}', got { closeCurly.Type }.`, closeCurly)
+        if closeCurly.Type ~= "}" then
+            state.Report(`Expected '}', got { closeCurly.Type }.`, closeCurly)
         end
 
         ty = {
@@ -697,22 +691,22 @@ function parseTypeAnnotation(state: ParseState, report: Report, shallow: boolean
             Items = itemTy,
         }
     else
-        report(`Invalid annotation token '{ annotation.Type }'.`, annotation)
+        state.Report(`Invalid annotation token '{ annotation.Type }'.`, annotation)
     end
 
     if shallow then
         return ty or { Kind = "Error" }
     else
-        return maybeCombineWithTypeOperator(state, report, ty or { Kind = "Error" })
+        return maybeCombineWithTypeOperator(state, ty or { Kind = "Error" :: "Error" })
     end
 end
 
-local function maybeParseTypeAnnotation(state: ParseState, report: Report): TypeAnnotation?
+local function maybeParseTypeAnnotation(state: ParseState): TypeAnnotation?
     local maybeColon, consumeColon = peekNextToken(state)
 
-    if maybeColon.Type == "Colon" then
+    if maybeColon.Type == ":" then
         consumeColon()
-        return parseTypeAnnotation(state, report)
+        return parseTypeAnnotation(state)
     end
 
     return nil
@@ -720,17 +714,17 @@ end
 
 local parseExpression
 
-local function parseBody(state: ParseState, report: Report, stopAtElse: boolean?): ({ Expression }, Token)
+local function parseBody(state: ParseState, stopAtElse: boolean?): ({ Expression }, Token)
     local body: { Expression } = {}
     local endTk, consumeEnd = peekNextToken(state)
 
     while endTk.Type ~= "Keyword" or (endTk.Keyword ~= "end" and (not stopAtElse or endTk.Keyword ~= "else")) do
         if endTk.Type == "EndOfFile" then
-            report(`Unexpected end-of-file before function 'end'.`, endTk)
+            state.Report(`Unexpected end-of-file before function 'end'.`, endTk)
             break
         end
 
-        local expr = parseExpression(state, report)
+        local expr = parseExpression(state)
         if not expr then
             break
         end
@@ -743,7 +737,7 @@ local function parseBody(state: ParseState, report: Report, stopAtElse: boolean?
     return body, endTk
 end
 
-local function getOperatorPrecedence(operatorTk: OperatorToken)
+local function getOperatorPrecedence(operatorTk: SymbolToken)
     local precedences: { [string]: number? } = {
         ["="] = 1,
         [".."] = 1,
@@ -754,44 +748,44 @@ local function getOperatorPrecedence(operatorTk: OperatorToken)
         ["//"] = 2,
     }
 
-    return precedences[operatorTk.Operator] or 0
+    return precedences[operatorTk.Type] or 0
 end
 
 local maybeCombineWithBinaryOperation
 
-local function parseBinaryOperation(state: ParseState, report: Report, left: Expression, opTk: OperatorToken, prevPrecedence: number?): Expression
-    if opTk.Operator == "=" and left.Type ~= "Reference" then
-        report(`Mutation operator expects LHS to be a reference, got a { left.Type } instead.`, left)
+local function parseBinaryOperation(state: ParseState, left: Expression, opTk: SymbolToken, prevPrecedence: number?): Expression
+    if opTk.Type == "=" and left.Type ~= "Reference" then
+        state.Report(`Mutation operator expects LHS to be a reference, got a { left.Type } instead.`, left)
     end
 
     local precedence = getOperatorPrecedence(opTk)
 
     local op = ex({
         Type = "BinaryOperation",
-        Operator = opTk.Operator,
+        Operator = opTk.Type,
         Left = left,
-        Right = parseExpression(state, report, precedence + 1) or invalidExpr(state, `Got end-of-file trying to parse '{ opTk.Operator }' expression.`, report),
+        Right = parseExpression(state, precedence + 1) or invalidExpr(state, `Got end-of-file trying to parse '{ opTk.Type }' expression.`),
     }, left)
 
-    return maybeCombineWithBinaryOperation(state, report, op, prevPrecedence)
+    return maybeCombineWithBinaryOperation(state, op, prevPrecedence)
 end
 
-function maybeCombineWithBinaryOperation(state: ParseState, report: Report, left: Expression, precedence: number?)
+function maybeCombineWithBinaryOperation(state: ParseState, left: Expression, precedence: number?)
     if precedence == math.huge then
         return left
     end
 
     local maybeOperator, consumeOperator = peekNextToken(state)
 
-    if maybeOperator.Type == "Operator" and getOperatorPrecedence(maybeOperator) >= (precedence or 0) then
+    if operators[maybeOperator.Type] and getOperatorPrecedence(maybeOperator) >= (precedence or 0) then
         consumeOperator()
-        return parseBinaryOperation(state, report, left, maybeOperator, precedence)
+        return parseBinaryOperation(state, left, maybeOperator, precedence)
     else
         return left
     end
 end
 
-local function parseFunction(state: ParseState, report: Report, token: Token): Expression
+local function parseFunction(state: ParseState, token: Token): Expression
     local gens = {}
     local name = nil
     local openParenTk = nextToken(state)
@@ -801,13 +795,13 @@ local function parseFunction(state: ParseState, report: Report, token: Token): E
         openParenTk = nextToken(state)
     end
 
-    if openParenTk.Type == "Operator" and openParenTk.Operator == "<" then
-        gens = parseGenericParameterList(state, report)
+    if openParenTk.Type == "<" then
+        gens = parseGenericParameterList(state)
         openParenTk = nextToken(state)
     end
 
-    if openParenTk.Type ~= "OpenParentheses" then
-        return invalidExpr(state, `Expected opening parentheses after function prefix, got { openParenTk.Type }.`, report)
+    if openParenTk.Type ~= "(" then
+        return invalidExpr(state, `Expected opening parentheses after function prefix, got { openParenTk.Type }.`)
     end
 
     local parameters = {}
@@ -817,35 +811,35 @@ local function parseFunction(state: ParseState, report: Report, token: Token): E
     }
     local paramTk = nextToken(state)
 
-    while paramTk.Type ~= "CloseParentheses" do
+    while paramTk.Type ~= ")" do
         if paramTk.Type == "Identifier" then
             if paramsPresent[paramTk.Identifier] then
-                report(`Duplicate parameter '{ paramTk.Identifier }'.`, paramTk)
+                state.Report(`Duplicate parameter '{ paramTk.Identifier }'.`, paramTk)
             end
 
             table.insert(parameters, {
                 Name = paramTk.Identifier,
-                Annotation = maybeParseTypeAnnotation(state, report),
+                Annotation = maybeParseTypeAnnotation(state),
             })
             paramsPresent[paramTk.Identifier] = true
 
             consumeOptionalComma(state)
             paramTk = nextToken(state)
-        elseif paramTk.Type == "Ellipsis" then
+        elseif paramTk.Type == "..." then
             variadic = {
                 Present = true,
-                Annotation = maybeParseTypeAnnotation(state, report),
+                Annotation = maybeParseTypeAnnotation(state),
             }
 
             local closeParen = nextToken(state)
 
-            if closeParen.Type ~= "CloseParentheses" then
-                return invalidExpr(state, `Expected closing parentheses after ellipsis in function parameter list, got { closeParen.Type } instead.`, report)
+            if closeParen.Type ~= ")" then
+                return invalidExpr(state, `Expected closing parentheses after ellipsis in function parameter list, got { closeParen.Type } instead.`)
             end
 
             break
         else
-            report(`Expected function parameter name, got { paramTk.Type }.`, paramTk)
+            state.Report(`Expected function parameter name, got { paramTk.Type }.`, paramTk)
             break
         end
     end
@@ -853,14 +847,14 @@ local function parseFunction(state: ParseState, report: Report, token: Token): E
     local returnTypeAnnotation = nil
     local maybeColon, consumeColon = peekNextToken(state)
 
-    if maybeColon.Type == "Colon" then
+    if maybeColon.Type == ":" then
         consumeColon()
-        returnTypeAnnotation = parseTypeAnnotation(state, report)
+        returnTypeAnnotation = parseTypeAnnotation(state)
     end
 
     state.FunctionDepth += 1
 
-    local body = parseBody(state, report)
+    local body = parseBody(state)
 
     state.FunctionDepth -= 1
 
@@ -877,17 +871,10 @@ local function parseFunction(state: ParseState, report: Report, token: Token): E
     }, token)
 end
 
-function parseExpression(state: ParseState, report: Report, precedence: number?): Expression?
+function parseExpression(state: ParseState, precedence: number?): Expression?
     local token = nextToken(state)
 
-    if token.Type == "InvalidSyntax" then
-        report(`Invalid syntax '{ token.Token }'.`, token)
-
-        return ex({
-            Type = "InvalidSyntax",
-            Token = token.Token,
-        }, token)
-    elseif token.Type == "Keyword" then
+    if token.Type == "Keyword" then
         if token.Keyword == "let" then
             local nameTk = nextToken(state)
             local name = "*error*"
@@ -895,9 +882,9 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
 
             if nameTk.Type == "Identifier" then
                 name = nameTk.Identifier
-                annotation = maybeParseTypeAnnotation(state, report)
+                annotation = maybeParseTypeAnnotation(state)
             else
-                report(`Expected an identifier, got a { nameTk.Type }.`, nameTk)
+                state.Report(`Expected an identifier, got a { nameTk.Type }.`, nameTk)
 
                 return ex({
                     Type = "InvalidSyntax",
@@ -908,9 +895,9 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
             local value = nil
             local maybeEqualsTk, consumeEquals = peekNextToken(state)
 
-            if maybeEqualsTk.Type == "Operator" and maybeEqualsTk.Operator == "=" then
+            if maybeEqualsTk.Type == "=" then
                 consumeEquals()
-                value = parseExpression(state, report) or invalidExpr(state, `Got end-of-file trying to parse declaration.`, report)
+                value = parseExpression(state) or invalidExpr(state, `Got end-of-file trying to parse declaration.`)
             end
 
             return ex({
@@ -925,19 +912,19 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
             local name = nextToken(state)
 
             if name.Type ~= "Identifier" then
-                return invalidExpr(state, `Expected identifier after 'type', got { name.Type } instead.`, report)
+                return invalidExpr(state, `Expected identifier after 'type', got { name.Type } instead.`)
             end
 
             local equals = nextToken(state)
 
-            if equals.Type ~= "Operator" or equals.Operator ~= "=" then
-                return invalidExpr(state, `Expected '=' after type alias name, got { equals.Type } instead.`, report)
+            if equals.Type ~= "=" then
+                return invalidExpr(state, `Expected '=' after type alias name, got '{ equals.Type }' instead.`)
             end
 
             return ex({
                 Type = "TypeAliasDeclaration",
                 Name = name.Identifier,
-                Value = parseTypeAnnotation(state, report),
+                Value = parseTypeAnnotation(state),
             }, token)
         elseif token.Keyword == "nil" then
             return ex({
@@ -950,14 +937,14 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
                 Constant = { Type = "boolean", Value = token.Keyword == "true" }
             }, token)
         elseif token.Keyword == "function" then
-            return parseFunction(state, report, token)
+            return parseFunction(state, token)
         elseif token.Keyword == "return" then
             if state.FunctionDepth == 0 then
-                return invalidExpr(state, "Cannot 'return' outside of functions.", report)
+                return invalidExpr(state, "Cannot 'return' outside of functions.")
             else
                 -- TODO not consuming it?
                 local nextTk, _ = peekNextToken(state)
-                local expr = if nextTk.Type == "Keyword" and nextTk.Keyword == "end" then nil else parseExpression(state, report)
+                local expr = if nextTk.Type == "Keyword" and nextTk.Keyword == "end" then nil else parseExpression(state)
 
                 return ex({
                     Type = "Return",
@@ -965,25 +952,25 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
                 }, token)
             end
         elseif token.Keyword == "end" then
-            report(`Unexpected 'end'.`, token)
+            state.Report(`Unexpected 'end'.`, token)
 
             return ex({
                 Type = "InvalidSyntax",
                 Token = token.Keyword,
             }, token)
         elseif token.Keyword == "if" then
-            local condition = parseExpression(state, report) or invalidExpr(state, "Reached end-of-file trying to parse 'if' condition.", report)
+            local condition = parseExpression(state) or invalidExpr(state, "Reached end-of-file trying to parse 'if' condition.")
             local thenTk = nextToken(state)
 
             if thenTk.Type ~= "Keyword" or thenTk.Keyword ~= "then" then
-                return invalidExpr(state, `Expected 'then' keyword following condition, got { thenTk.Type }.`, report)
+                return invalidExpr(state, `Expected 'then' keyword following condition, got { thenTk.Type }.`)
             end
 
-            local ifBody, endTk = parseBody(state, report, true)
+            local ifBody, endTk = parseBody(state, true)
             local elseBody = nil
 
             if endTk.Type == "Keyword" and endTk.Keyword == "else" then
-                elseBody = parseBody(state, report)
+                elseBody = parseBody(state)
             end
 
             return ex({
@@ -993,7 +980,7 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
                 ElseBody = elseBody,
             }, token)
         elseif token.Keyword == "then" or token.Keyword == "else" then
-            return invalidExpr(state, `Unexpected '{ token.Keyword }' keyword.`, report)
+            return invalidExpr(state, `Unexpected '{ token.Keyword }' keyword.`)
         else
             unreachable(token.Keyword)
             error(`Unreachable.`)
@@ -1002,16 +989,16 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
         local left: Expression
         local maybeParenthesesTk, consumeParentheses = peekNextToken(state)
 
-        if maybeParenthesesTk.Type == "OpenParentheses" then
+        if maybeParenthesesTk.Type == "(" then
             consumeParentheses()
 
             local argC = nextCharacter(state.Program, state.Position.Offset)
             local args = {}
 
             while argC ~= ")" do
-                local arg = parseExpression(state, report)
+                local arg = parseExpression(state)
                 if not arg then
-                    return invalidExpr(state, `Got end-of-file trying to parse function argument.`, report)
+                    return invalidExpr(state, `Got end-of-file trying to parse function argument.`)
                 end
 
                 table.insert(args, arg)
@@ -1036,22 +1023,22 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
 
         local maybeSquareBracketTk, consumeSquareBracket = peekNextToken(state)
 
-        if maybeSquareBracketTk.Type == "OpenSquareBraces" then
+        if maybeSquareBracketTk.Type == "[" then
             consumeSquareBracket()
 
-            local index = parseExpression(state, report) or invalidExpr(state, `Reached end-of-file trying to parse index expression.`, report)
+            local index = parseExpression(state) or invalidExpr(state, `Reached end-of-file trying to parse index expression.`)
             local closeBrackets = nextToken(state)
 
-            if closeBrackets.Type ~= "CloseSquareBraces" then
-                return invalidExpr(state, `Expected closing square brackets, got end-of-file.`, report)
+            if closeBrackets.Type ~= "]" then
+                return invalidExpr(state, `Expected closing square brackets, got end-of-file.`)
             end
 
             local maybeEqualsTk, consumeEquals = peekNextToken(state)
 
-            if maybeEqualsTk.Type == "Operator" and maybeEqualsTk.Operator == "=" then
+            if maybeEqualsTk.Type == "=" then
                 consumeEquals()
 
-                local value = parseExpression(state, report) or invalidExpr(state, `Reached end-of-file trying to parse index assignment.`, report)
+                local value = parseExpression(state) or invalidExpr(state, `Reached end-of-file trying to parse index assignment.`)
                 return ex({
                     Type = "WriteIndex",
                     List = left,
@@ -1067,7 +1054,7 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
             end
         end
 
-        return maybeCombineWithBinaryOperation(state, report, left, precedence)
+        return maybeCombineWithBinaryOperation(state, left, precedence)
     elseif token.Type == "Literal" then
         -- TODO luau does not report error when `position` is not attached even though the annotation is explicit
         local constant: Expression = ex({
@@ -1075,25 +1062,25 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
             Constant = token.Literal,
         }, token)
 
-        return maybeCombineWithBinaryOperation(state, report, constant, precedence)
-    elseif token.Type == "Comma" then
+        return maybeCombineWithBinaryOperation(state, constant, precedence)
+    elseif token.Type == "," then
         -- TODO check
         state.Position.Offset += 1
-        return parseExpression(state, report)
-    elseif token.Type == "Operator" then
-        if token.Operator == "-" or token.Operator == "#" then
+        return parseExpression(state)
+    elseif operators[token.Type] then
+        if token.Type == "-" or token.Type == "#" then
             local inner: Expression
 
             local nextTk, consumeNext = peekNextToken(state)
 
-            if nextTk.Type == "OpenParentheses" then
+            if nextTk.Type == "(" then
                 consumeNext()
 
-                inner = parseExpression(state, report) or invalidExpr(state, `Got end-of-file parsing '{ token.Operator }' expression after parentheses.`, report)
+                inner = parseExpression(state) or invalidExpr(state, `Got end-of-file parsing '{ token.Type }' expression after parentheses.`)
                 state.Position.Offset += 1 -- skip closing parens
                 state.Position.Column += 1
-            elseif nextTk.Type == "Ellipsis" then
-                if token.Operator == "#" then
+            elseif nextTk.Type == "..." then
+                if token.Type == "#" then
                     consumeNext()
 
                     return ex({
@@ -1101,35 +1088,35 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
                     }, token)
                 end
             else
-                inner = parseExpression(state, report, math.huge) or invalidExpr(state, `Got end-of-file parsing '{ token.Operator }' expression.`, report)
+                inner = parseExpression(state, math.huge) or invalidExpr(state, `Got end-of-file parsing '{ token.Type }' expression.`)
             end
 
             local negation = ex({
                 Type = "UnaryOperation",
-                Operator = token.Operator,
+                Operator = token.Type,
                 Operand = inner,
             }, token)
 
-            return maybeCombineWithBinaryOperation(state, report, negation)
+            return maybeCombineWithBinaryOperation(state, negation)
         else
-            report(`Unexpected '{ token.Operator }' operator.`, token)
+            state.Report(`Unexpected '{ token.Type }' operator.`, token)
 
             return ex({
                 Type = "InvalidSyntax",
-                Token = token.Operator,
+                Token = token.Type,
             }, token)
         end
-    elseif token.Type == "OpenCurlyBraces" then
+    elseif token.Type == "{" then
         local items: { Expression } = {}
         local itemTk, consumeClosingParentheses = peekNextToken(state)
 
-        while itemTk.Type ~= "CloseCurlyBraces" do
-            local item = parseExpression(state, report)
+        while itemTk.Type ~= "}" do
+            local item = parseExpression(state)
 
             if item then
                 table.insert(items, item)
             else
-                return invalidExpr(state, `Reached end-of-file parsing list items.`, report)
+                return invalidExpr(state, `Reached end-of-file parsing list items.`)
             end
 
             consumeOptionalComma(state)
@@ -1143,20 +1130,20 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
             List = items,
         }, token)
 
-    elseif token.Type == "Ellipsis" then
+    elseif token.Type == "..." then
         local selectorTk, consumeSelector = peekNextToken(state)
 
-        if selectorTk.Type == "OpenSquareBraces" then
+        if selectorTk.Type == "[" then
             consumeSelector()
 
-            local selector = parseExpression(state, report) or invalidExpr(state, `Reached end-of-file parsing variadic argument selector.`, report)
+            local selector = parseExpression(state) or invalidExpr(state, `Reached end-of-file parsing variadic argument selector.`)
             local closingTk = nextToken(state)
 
-            if closingTk.Type ~= "CloseSquareBraces" then
-                report(`Expected closing square brackets for variadic argument selector, got { closingTk.Type } instead.`, closingTk)
+            if closingTk.Type ~= "]" then
+                state.Report(`Expected closing square brackets for variadic argument selector, got { closingTk.Type } instead.`, closingTk)
             end
 
-            return maybeCombineWithBinaryOperation(state, report, ex({
+            return maybeCombineWithBinaryOperation(state, ex({
                 Type = "VariadicSelection",
                 Selection = selector,
             }, token), precedence)
@@ -1165,17 +1152,17 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
                 Type = "VariadicArguments",
             }, token)
         end
-    elseif token.Type == "OpenParentheses" then
-        local inner = parseExpression(state, report)
+    elseif token.Type == "(" then
+        local inner = parseExpression(state)
         local parentheses = nextToken(state)
-        assert(parentheses.Type == "CloseParentheses", `Expected closing parentheses, got { parentheses.Type }`)
+        assert(parentheses.Type == ")", `Expected closing parentheses, got { parentheses.Type }`)
 
         return inner
 
     elseif token.Type == "EndOfFile" then
         return nil
     else
-        report(`Unexpected { token.Type }.`, token)
+        state.Report(`Unexpected '{ token.Type }'.`, token)
 
         return ex({
             Type = "InvalidSyntax",
@@ -1185,6 +1172,8 @@ function parseExpression(state: ParseState, report: Report, precedence: number?)
 end
 
 function caw.parse(program: string): ParseResult
+    local success = true
+
     local state: ParseState = {
         Program = program,
         Position = {
@@ -1193,18 +1182,18 @@ function caw.parse(program: string): ParseResult
             Offset = 1,
         },
         FunctionDepth = 0,
+        Report = function(s, e)
+            success = false
+            print(`{ e.Position.Line }:{ e.Position.Column }: { s }`)
+        end,
     }
 
     -- TODO luau extraneous annotation
     local exprs: { Expression } = {}
-    local success = true
     local tk = peekNextToken(state)
 
     while tk.Type ~= "EndOfFile" do
-        local expr = parseExpression(state, function(s, e)
-            success = false
-            print(`{ e.Position.Line }:{ e.Position.Column }: { s }`)
-        end)
+        local expr = parseExpression(state)
         assert(expr)
 
         table.insert(exprs, expr)

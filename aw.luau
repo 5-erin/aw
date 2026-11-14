@@ -1,4 +1,4 @@
--- aw.luau - erin5/@PhoenixWhitefire, 03/09/2026
+-- aw.luau - @5-erin, 03/09/2026
 local caw = require("./caw")
 
 local hmProgram = [[

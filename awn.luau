@@ -1468,41 +1468,22 @@ local typeAnnotationToType
 local check
 
 -- `Sub <: Super`. Can modify bounds of either if either are Free.
--- Otherwise report error if relation does not hold.
-type SubtypeConstraint = {
-    read Position: caw.Position,
-    read Sub: Type,
-    read Super: Type,
-}
-
-local function subtypeConstraint(position, sub, super): SubtypeConstraint
-    return {
-        Position = position,
-        Sub = sub,
-        Super = super,
-    }
-end
-
-local function addConstraint(state: InferenceState, constraint: SubtypeConstraint)
-    table.insert(state.SubtypeConstraints, constraint)
-end
-
-local function dispatchConstraints(state: InferenceState)
-    for _, sc in state.SubtypeConstraints do
-        if logInference then
-            print(`Dispatching '{ typeToString(sc.Sub) }' <: '{ typeToString(sc.Super) }'`)
-        end
-
-        local result = isSubtypeOf(normalize(sc.Sub), normalize(sc.Super))
-
-        if result.Holds then
-            applyBoundsChanges(result.RequiredBoundsChanges)
-        end
-
-        check(sc.Sub, sc.Super, sc.Position)
+local function subtypingRelation(state: InferenceState, sub: Type, super: Type)
+    if logInference then
+        print(`Constraining '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
     end
 
-    table.clear(state.SubtypeConstraints)
+    local result = isSubtypeOf(normalize(sub), normalize(super))
+
+    if result.Holds then
+        applyBoundsChanges(result.RequiredBoundsChanges)
+    end
+end
+
+-- `subtypingRelation`, but report error if relation does not hold.
+local function constrainSubtype(state: InferenceState, position: caw.Position, sub: Type, super: Type)
+    subtypingRelation(state, sub, super)
+    check(sub, super, position)
 end
 
 local substituteAllIn
@@ -1590,7 +1571,7 @@ type FreeTypeSubstitution = {
 }
 
 type GatherFreeTypeSubstitutionsState = {
-    Expression: caw.Expression,
+    Expression: caw.Expression?,
     Substitutions: { [Type]: Type },
     Polarities: { [Type]: Polarity },
     Generics: { Type },
@@ -1650,8 +1631,11 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
         end
 
         if state.Polarity ~= "Positive" and isNever(normalize(ty.UpperBound)) then
-            local nameCorrected = string.upper(string.sub(name, 1, 1)) .. string.sub(name, 2, #name)
-            state.Substitutions[ty] = errorReport(`{ nameCorrected } has been reduced to never, this function is not callable with any value.`, state.Expression.Position)
+            -- No source expression = don't report.
+            if state.Expression then
+                local nameCorrected = string.upper(string.sub(name, 1, 1)) .. string.sub(name, 2, #name)
+                state.Substitutions[ty] = errorReport(`{ nameCorrected } has been reduced to never, this function is not callable with any value.`, state.Expression.Position)
+            end
         else
             local sub = if state.Polarity == "Positive" then ty.LowerBound else ty.UpperBound
 
@@ -1726,8 +1710,38 @@ type InferenceState = {
     -- `Type` = Other: The return type was explicitly annotated.
     ReturnType: nil | Type | boolean,
     Variadic: Type?,
-    SubtypeConstraints: { SubtypeConstraint },
 }
+
+function instantiateGenericsAtCallsite(state: InferenceState, fn: Type, callsite: Type)
+    subtypingRelation(state, fn, callsite)
+
+    if fn.Kind == "Function" then
+        for _, gen in fn.Generics do
+            state.Generics[gen] = nil
+        end
+    end
+
+    local substitutions: GatherFreeTypeSubstitutionsState = {
+        Substitutions = {},
+        Polarities = {},
+        Generics = {},
+        Polarity = "Mixed",
+        AlwaysConcretize = true,
+    }
+    local newGens = {}
+    gatherFreeTypeSubstitutions(substitutions, fn, "function call")
+
+    if logInference then
+        print(`Implicit generic instantiations:`)
+        for gen, ty in substitutions.Substitutions do
+            print(`* { typeToString(gen) } => { typeToString(ty) }`)
+        end
+        print("")
+    end
+
+    assert(#newGens == 0)
+    return substituteAllIn(fn, substitutions.Substitutions, {})
+end
 
 local function infer(state: InferenceState, expr: caw.Expression, expected: Type?): Type?
     if expr.Type == "Constant" then
@@ -1756,7 +1770,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         if anno and ty then
             local position = if expr.Declaration.Value then expr.Declaration.Value.Position else expr.Position
-            addConstraint(state, subtypeConstraint(position, ty, anno))
+            constrainSubtype(state, position, ty, anno)
         end
 
         return ty
@@ -1775,11 +1789,10 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local itemsTy = if expected and expected.Kind == "List" then expected.Items else freeType()
 
         for _, item in expr.List do
-            local itemTy = infer(state, item, itemsTy) or errorReport(`Expression does not return a value.`, item.Position)
-            addConstraint(state, subtypeConstraint(item.Position, itemTy, itemsTy))
+            local currentItemTy = infer(state, item, itemsTy) or errorReport(`Expression does not return a value.`, item.Position)
+            constrainSubtype(state, item.Position, currentItemTy, itemsTy)
         end
 
-        dispatchConstraints(state)
         itemsTy = substituteAllIn(itemsTy, {}, {})
         return listType(itemsTy)
 
@@ -1789,8 +1802,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local listTy = infer(state, expr.List, listType(itemsTy)) or errorReport(`Tried to index an expression that returned no value.`, expr.List.Position)
         local indexTy = infer(state, expr.Index, primitiveType("number")) or errorReport(`Index was an expression that returned no value.`, expr.Index.Position)
 
-        addConstraint(state, subtypeConstraint(expr.Position, listTy, listType(itemsTy)))
-        addConstraint(state, subtypeConstraint(expr.Position, indexTy, primitiveType("number")))
+        constrainSubtype(state, expr.List.Position, listTy, listType(itemsTy))
+        constrainSubtype(state, expr.Index.Position, indexTy, primitiveType("number"))
 
         return itemsTy
 
@@ -1800,8 +1813,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local listTy = infer(state, expr.List, listType(itemsTy)) or errorReport(`Tried to index an expression that returned no value.`, expr.List.Position)
         local indexTy = infer(state, expr.Index, primitiveType("number")) or errorReport(`Index was an expression that returned no value.`, expr.Index.Position)
 
-        addConstraint(state, subtypeConstraint(expr.Position, listTy, listType(itemsTy)))
-        addConstraint(state, subtypeConstraint(expr.Position, indexTy, primitiveType("number")))
+        constrainSubtype(state, expr.List.Position, listTy, listType(itemsTy))
+        constrainSubtype(state, expr.Index.Position, indexTy, primitiveType("number"))
 
         local valueTy = infer(state, expr.Value, itemsTy)
 
@@ -1809,7 +1822,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             return errorReport(`Tried to assign list index to an expression that returns no value.`, expr.Value.Position)
         end
 
-        addConstraint(state, subtypeConstraint(expr.Position, valueTy, itemsTy))
+        constrainSubtype(state, expr.Value.Position, valueTy, itemsTy)
         return valueTy
 
     elseif expr.Type == "UnaryOperation" then
@@ -1820,7 +1833,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`Attempted to use '-' on expression that returns no value.`, expr.Operand.Position)
             end
 
-            addConstraint(state, subtypeConstraint(expr.Operand.Position, operand, primitiveType("number")))
+            constrainSubtype(state, expr.Operand.Position, operand, primitiveType("number"))
             return primitiveType("number")
 
         elseif expr.Operator == "#" then
@@ -1830,7 +1843,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`Attempted to use '#' on expression that returns no value.`, expr.Operand.Position)
             end
 
-            addConstraint(state, subtypeConstraint(expr.Operand.Position, operand, unionType({ primitiveType("string"), primitiveType("list") })))
+            constrainSubtype(state, expr.Operand.Position, operand, unionType({ primitiveType("string"), primitiveType("list") }))
             return primitiveType("number")
         else
             unreachable(expr.Operator)
@@ -1878,7 +1891,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             assert(ref.Expression.Type == "Declaration")
 
             if annoTy then
-                addConstraint(state, subtypeConstraint(value.Position, valueTy, annoTy))
+                constrainSubtype(state, value.Position, valueTy, annoTy)
             else
                 typeAssociations[variable.Reference] = {
                     Expression = ref.Expression,
@@ -1901,8 +1914,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
-            addConstraint(state, subtypeConstraint(expr.Left.Position, leftTy, primitiveType("number")))
-            addConstraint(state, subtypeConstraint(expr.Left.Position, rightTy, primitiveType("number")))
+            constrainSubtype(state, expr.Left.Position, leftTy, primitiveType("number"))
+            constrainSubtype(state, expr.Right.Position, rightTy, primitiveType("number"))
 
             return primitiveType("number")
 
@@ -1918,8 +1931,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
-            addConstraint(state, subtypeConstraint(expr.Left.Position, leftTy, primitiveType("string")))
-            addConstraint(state, subtypeConstraint(expr.Left.Position, rightTy, primitiveType("string")))
+            constrainSubtype(state, expr.Left.Position, leftTy, primitiveType("string"))
+            constrainSubtype(state, expr.Right.Position, rightTy, primitiveType("string"))
 
             return primitiveType("string")
 
@@ -1937,8 +1950,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
-            addConstraint(state, subtypeConstraint(expr.Left.Position, leftTy, primitiveType("number")))
-            addConstraint(state, subtypeConstraint(expr.Left.Position, rightTy, primitiveType("number")))
+            constrainSubtype(state, expr.Left.Position, leftTy, primitiveType("number"))
+            constrainSubtype(state, expr.Right.Position, rightTy, primitiveType("number"))
 
             return primitiveType("boolean")
 
@@ -1991,9 +2004,22 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         local prevVarTy = state.Variadic
         local prevRetTy = state.ReturnType
-        state.ReturnType = if expected and expected.Kind == "Function" then if expected.Returns == nil then false else expected.Returns
-                            else if expr.Function.ReturnAnnotation then if expr.Function.ReturnAnnotation.Kind == "Unit" then false else typeAnnotationToType(expr.Position, expr.Function.ReturnAnnotation)
-                            else true
+
+        if expr.Function.ReturnAnnotation then
+            if expr.Function.ReturnAnnotation.Kind == "Unit" then
+                state.ReturnType = false
+            else
+                state.ReturnType = typeAnnotationToType(expr.Position, expr.Function.ReturnAnnotation)
+            end
+        elseif expected and expected.Kind == "Function" then
+            if expected.Returns == nil then
+                state.ReturnType = false
+            else
+                state.ReturnType = expected.Returns
+            end
+        else
+            state.ReturnType = true
+        end
 
         if expr.Function.Variadic.Present then
             state.Variadic = freeType()
@@ -2004,8 +2030,6 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         for _, expr in expr.Function.Body do
             infer(state, expr)
         end
-
-        dispatchConstraints(state)
 
         local retTy = state.ReturnType
         local varTy = state.Variadic
@@ -2134,7 +2158,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                     retTy.LowerBound = makeUnion(retTy.LowerBound, thisRet)
                     return retTy
                 else
-                    addConstraint(state, subtypeConstraint(expr.Position, thisRet, retTy))
+                    constrainSubtype(state, expr.Position, thisRet, retTy)
                     return retTy
                 end
             end
@@ -2184,38 +2208,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             arguments[i] = infer(state, a, expect)
         end
 
-        local checkFnTy = functionType({}, arguments, neverType(), expected)
-
-        addConstraint(state, subtypeConstraint(expr.Position, fnTy, checkFnTy))
-        dispatchConstraints(state)
-
-        if fnTy.Kind == "Function" then
-            for _, gen in fnTy.Generics do
-                state.Generics[gen] = nil
-            end
-        end
-
-        local substitutions: GatherFreeTypeSubstitutionsState = {
-            Expression = expr,
-            Substitutions = {},
-            Polarities = {},
-            Generics = {},
-            Polarity = "Mixed",
-            AlwaysConcretize = true,
-        }
-        local newGens = {}
-        gatherFreeTypeSubstitutions(substitutions, fnTy, "function call")
-
-        if logInference then
-            print(`Implicit generic instantiations:`)
-            for gen, ty in substitutions.Substitutions do
-                print(`* { typeToString(gen) } => { typeToString(ty) }`)
-            end
-            print("")
-        end
-
-        assert(#newGens == 0)
-        fnTy = substituteAllIn(fnTy, substitutions.Substitutions, {})
+        local callsiteTy = functionType({}, arguments, neverType(), expected)
+        fnTy = instantiateGenericsAtCallsite(state, fnTy, callsiteTy)
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
 
@@ -2278,7 +2272,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
         if result and expected then
-            addConstraint(state, subtypeConstraint(expr.Position, result, expected))
+            constrainSubtype(state, expr.Position, result, expected)
         end
 
         return result
@@ -2538,7 +2532,6 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     local state: InferenceState = {
         Generics = {},
         ReturnType = nil,
-        SubtypeConstraints = {},
     }
 
     local builtins = {}
@@ -2550,8 +2543,6 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     for _, expr in expressions do
         infer(state, expr)
     end
-
-    dispatchConstraints(state)
 
     print("")
 
@@ -2565,7 +2556,7 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     for _, k in typeEnvOrdered do
         if not builtins[k] then
             local a = assert(typeEnv[k])
-            print(`type { k } = { typeToString(a, k) }`)
+            print(`type { k } = { typeToString(a, { Alias = k }) }`)
         end
     end
 end

@@ -380,6 +380,8 @@ local function deepCopy(tab: any): any
     return t
 end
 
+local isSubtypeOf
+
 local function unionNormalizedType(n: NormalizedType, with: NormalizedType)
     n.Error = n.Error or with.Error
     n.Nil = n.Nil or with.Nil
@@ -428,15 +430,19 @@ local function unionNormalizedType(n: NormalizedType, with: NormalizedType)
         -- Reset to top.
         n.List = {}
     elseif n.List and n.List.Items and with.List and with.List.Items then
-        unionNormalizedType(n.List.Items, with.List.Items)
+        if not isSubtypeOf(n.List.Items, with.List.Items).Holds or not isSubtypeOf(with.List.Items, n.List.Items).Holds then
+            -- Reading from it would be a union, writing to it would be an intersection, this is not representable currently.
+            n.List.Items = nil
+        end
     end
 
     if not n.Function and with.Function then
         n.Function = table.clone(with.Function)
-    elseif n.Function and with.Function and not with.Function.Components and n.Function.Components then
-        n.Function = {}
     elseif n.Function and with.Function and n.Function.Components and with.Function.Components then
-        n.Function = {} -- No.
+        table.move(with.Function.Components, 1, #with.Function.Components, #n.Function.Components, n.Function.Components)
+    elseif n.Function and n.Function.Components and with.Function and not with.Function.Components then
+        -- Reset to top.
+        n.Function = {}
     end
 
     if with.Generic then
@@ -527,7 +533,9 @@ local function intersectNormalizedType(n: NormalizedType, with: NormalizedType)
     elseif n.List and not n.List.Items and with.List and with.List.Items then
         n.List.Items = with.List.Items
     elseif n.List and n.List.Items and with.List and with.List.Items then
-        intersectNormalizedType(n.List.Items, with.List.Items)
+        if not isSubtypeOf(n.List.Items, with.List.Items).Holds or not isSubtypeOf(with.List.Items, n.List.Items).Holds then
+            n.List.Items = nil
+        end
     end
 
     if n.Function and with.Function and with.Function.Components then
@@ -536,6 +544,9 @@ local function intersectNormalizedType(n: NormalizedType, with: NormalizedType)
         else
             n.Function.Components = with.Function.Components
         end
+    -- `function` & `(T) -> U` = `(T) -> U`
+    elseif n.Function and not n.Function.Components and with.Function and with.Function.Components then
+        n.Function.Components = table.clone(with.Function.Components)
     elseif n.Function and not with.Function then
         n.Function = nil
     end
@@ -692,7 +703,6 @@ local function normalize(ty: Type): NormalizedType
     return normalize_(ty, {})
 end
 
-local isSubtypeOf
 local isSupertypeOf
 local normalizationToType
 
@@ -787,6 +797,10 @@ local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Typ
         local consistencyResult = isSubtypeOf(normalize(change.Target.LowerBound), normalize(change.Target.UpperBound))
 
         if not consistencyResult.Holds then
+            if logInference then
+                print(`Free type bounds mismatch for '{ typeToString(change.Target) }': '{ typeToString(change.Target.LowerBound) }' </: '{ typeToString(change.Target.UpperBound) }' - { consistencyResult.FailedPath }`)
+            end
+
             erroneousSet[change.Target] = true
         end
     end
@@ -949,20 +963,7 @@ local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunct
                     local aFn = normalizationToType(caNorm)
                     local bFn = normalizationToType(cbNorm)
 
-                    local gensToSubstitute = {}
-                    local ftyToGeneric = {}
-                    assert(aFn.Kind == "Function")
-
-                    for _, gen in aFn.Generics do
-                        local free = freeType()
-                        gensToSubstitute[gen] = free
-                        ftyToGeneric[free] = gen
-                    end
-
-                    aFn = functionType({}, aFn.Parameters, aFn.Variadic, aFn.Returns)
-                    aFn = substituteAllIn(aFn, gensToSubstitute, {})
-
-                    local instantiated, erroneous = instantiateGenericsAtCallsite(aFn, bFn)
+                    local instantiated, erroneous, ftyToGeneric = instantiateGenericsAtCallsite(aFn, bFn)
 
                     for _, free in erroneous do
                         local gen = ftyToGeneric[free]
@@ -1046,6 +1047,11 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         return subtypeSuccess()
     end
 
+    -- `unknown` is not a useful narrowing of an upper bound.
+    if isUnknown(b) then
+        return subtypeSuccess()
+    end
+
     if a.Free then
         -- TODO luau removing annotation causes read-write indexer mismatch error
         local changes: { RequiredBoundsChange } = {}
@@ -1058,6 +1064,11 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         end
 
         return subtypeSuccess(changes)
+    end
+
+    -- `never` is a proper narrowing, that's why we want to handle it before hitting this early-out.
+    if isNever(b) and not isNever(a) then
+        return subtypeFailure("Nothing is a subtype of `never` except `never` itself.")
     end
 
     if b.Free then
@@ -1588,10 +1599,10 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
         return listType(substituteAllIn(ty.Items, substitutions, traversed))
 
     elseif ty.Kind == "Generic" then
-        return substitutions[ty] or ty
+        return if substitutions[ty] then substituteAllIn(substitutions[ty], substitutions, traversed) else ty
     elseif ty.Kind == "Free" then
         if substitutions[ty] then
-            return substitutions[ty]
+            return substituteAllIn(substitutions[ty], substitutions, traversed)
         end
 
         if ty.LowerBound.Kind ~= "never" and ty.UpperBound.Kind == "unknown" then
@@ -1795,15 +1806,41 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
 end
 
 type InferenceState = {
+    Variadic: Type?,
     -- `true` = We're inferring a return type, but we haven't come across a `return` yet.
     -- `false`= Function is explicitly annotated as returning no value.
     -- `Type` = `FreeType`: We're currently inferring a return type.
     -- `Type` = Other: The return type was explicitly annotated.
     ReturnType: nil | Type | boolean,
-    Variadic: Type?,
 }
 
-function instantiateGenericsAtCallsite(fn: Type, callsite: Type)
+function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type }, { [Type]: Type })
+    local gensToSubstitute = {}
+    local ftyToGeneric = {}
+
+    if logInference then
+        print("Generic substitutions:")
+    end
+
+    if fn.Kind == "Function" then
+        for _, gen in fn.Generics do
+            local free = freeType()
+            gensToSubstitute[gen] = free
+            ftyToGeneric[free] = gen
+
+            if logInference then
+                print(`* { typeToString(gen) } => { typeToString(free) }`)
+            end
+        end
+
+        if logInference then
+            print("")
+        end
+
+        fn = functionType({}, fn.Parameters, fn.Variadic, fn.Returns)
+        fn = substituteAllIn(fn, gensToSubstitute, {})
+    end
+
     local erroneous = subtypingRelation(fn, callsite)
 
     local substitutions: GatherFreeTypeSubstitutionsState = {
@@ -1825,7 +1862,7 @@ function instantiateGenericsAtCallsite(fn: Type, callsite: Type)
     end
 
     assert(#newGens == 0)
-    return substituteAllIn(fn, substitutions.Substitutions, {}), erroneous
+    return substituteAllIn(fn, substitutions.Substitutions, {}), erroneous, ftyToGeneric
 end
 
 local function infer(state: InferenceState, expr: caw.Expression, expected: Type?): Type?
@@ -2273,43 +2310,26 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local fnTy = fn.Type
         local arguments = table.create<<Type>>(#expr.Call.Arguments)
 
-        if fnTy.Kind == "Function" then
-            if logInference then
-                print(`{ expr.Position.Line }:{ expr.Position.Column }: Generic substitutions:`)
-            end
-
-            local gensToSubstitute = {}
-
-            for _, gen in fnTy.Generics do
-                local free = freeType()
-                gensToSubstitute[gen] = free
-
-                if logInference then
-                    print(`* { typeToString(gen) } => { typeToString(free) }`)
-                end
-            end
-
-            fnTy = functionType({}, fnTy.Parameters, fnTy.Variadic, fnTy.Returns)
-            fnTy = substituteAllIn(fnTy, gensToSubstitute, {})
-
-            if logInference then
-                print("")
-            end
-        end
-
         for i, a in expr.Call.Arguments do
             local expect = (fnTy.Kind == "Function" and fnTy.Parameters[i]) or freeType()
             arguments[i] = infer(state, a, expect)
         end
 
         local callsiteTy = functionType({}, arguments, neverType(), expected)
+
+        if logInference then
+            print(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
+        end
+
         fnTy = instantiateGenericsAtCallsite(fnTy, callsiteTy)
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
 
-        if not normFn.Function then
+        if not normFn.Function or not isSubtypeOf(normFn, normalize(primitiveType("function"))).Holds then
             return errorReport(`'{ normalizationToString(normFn) }' is not callable.`, expr.Position)
         end
+
+        assert(normFn.Function)
 
         if not normFn.Function.Components then
             return errorReport(`The top 'function' type is not safe to call.`, expr.Position)

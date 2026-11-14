@@ -480,6 +480,18 @@ local function peekNextToken(state: ParseState): (Token, () -> ())
     end
 end
 
+local function tokenToString(tk: Token): string
+    if tk.Type == "Keyword" then
+        return tk.Keyword
+    elseif tk.Type == "Identifier" then
+        return tk.Identifier
+    elseif tk.Type == "Literal" then
+        return tostring(tk.Literal.Value)
+    else
+        return tk.Type
+    end
+end
+
 local function consumeOptionalComma(state: ParseState)
     local next, consume = peekNextToken(state)
 
@@ -545,7 +557,7 @@ local function parseGenericParameterList(state: ParseState): { read GenericTypeA
         local gen = nextToken(state)
 
         if gen.Type ~= "Identifier" then
-            state.Report(`Expected generic name, got { gen.Type } instead.`, gen)
+            state.Report(`Expected generic name, got '{ tokenToString(gen) }' instead.`, gen)
             break
         end
 
@@ -673,7 +685,7 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
             }
         -- `(T, U)` is not a valid annotation,
         elseif definitelyFunction then
-            state.Report(`Expected '->' for function type, got { maybeArrow.Type } instead.`, maybeArrow)
+            state.Report(`Expected '->' for function type, got '{ tokenToString(maybeArrow) }' instead.`, maybeArrow)
         -- ... but `(T)` is.
         else
             ty = params[1] or { Kind = "Unit" :: "Unit" }
@@ -683,7 +695,7 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
         local closeCurly = nextToken(state)
 
         if closeCurly.Type ~= "}" then
-            state.Report(`Expected '}', got { closeCurly.Type }.`, closeCurly)
+            state.Report(`Expected '}', got '{ tokenToString(closeCurly) }'.`, closeCurly)
         end
 
         ty = {
@@ -691,7 +703,7 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
             Items = itemTy,
         }
     else
-        state.Report(`Invalid annotation token '{ annotation.Type }'.`, annotation)
+        state.Report(`Expected annotation, got '{ tokenToString(annotation) }'.`, annotation)
     end
 
     if shallow then
@@ -801,7 +813,7 @@ local function parseFunction(state: ParseState, token: Token): Expression
     end
 
     if openParenTk.Type ~= "(" then
-        return invalidExpr(state, `Expected opening parentheses after function prefix, got { openParenTk.Type }.`)
+        return invalidExpr(state, `Expected opening parentheses after function prefix, got '{ tokenToString(openParenTk) }'.`)
     end
 
     local parameters = {}
@@ -834,12 +846,12 @@ local function parseFunction(state: ParseState, token: Token): Expression
             local closeParen = nextToken(state)
 
             if closeParen.Type ~= ")" then
-                return invalidExpr(state, `Expected closing parentheses after ellipsis in function parameter list, got { closeParen.Type } instead.`)
+                return invalidExpr(state, `Expected closing parentheses after ellipsis in function parameter list, got '{ tokenToString(closeParen) }' instead.`)
             end
 
             break
         else
-            state.Report(`Expected function parameter name, got { paramTk.Type }.`, paramTk)
+            state.Report(`Expected function parameter name, got '{ tokenToString(paramTk) }'.`, paramTk)
             break
         end
     end
@@ -884,7 +896,7 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
                 name = nameTk.Identifier
                 annotation = maybeParseTypeAnnotation(state)
             else
-                state.Report(`Expected an identifier, got a { nameTk.Type }.`, nameTk)
+                state.Report(`Expected an identifier, got '{ tokenToString(nameTk) }'.`, nameTk)
 
                 return ex({
                     Type = "InvalidSyntax",
@@ -912,13 +924,13 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
             local name = nextToken(state)
 
             if name.Type ~= "Identifier" then
-                return invalidExpr(state, `Expected identifier after 'type', got { name.Type } instead.`)
+                return invalidExpr(state, `Expected identifier after 'type', got '{ tokenToString(name) }' instead.`)
             end
 
             local equals = nextToken(state)
 
             if equals.Type ~= "=" then
-                return invalidExpr(state, `Expected '=' after type alias name, got '{ equals.Type }' instead.`)
+                return invalidExpr(state, `Expected '=' after type alias name, got '{ tokenToString(equals) }' instead.`)
             end
 
             return ex({
@@ -963,7 +975,7 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
             local thenTk = nextToken(state)
 
             if thenTk.Type ~= "Keyword" or thenTk.Keyword ~= "then" then
-                return invalidExpr(state, `Expected 'then' keyword following condition, got { thenTk.Type }.`)
+                return invalidExpr(state, `Expected 'then' keyword following condition, got '{ tokenToString(thenTk) }'.`)
             end
 
             local ifBody, endTk = parseBody(state, true)
@@ -1076,7 +1088,7 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
             if nextTk.Type == "(" then
                 consumeNext()
 
-                inner = parseExpression(state) or invalidExpr(state, `Got end-of-file parsing '{ token.Type }' expression after parentheses.`)
+                inner = parseExpression(state) or invalidExpr(state, `Got end-of-file parsing '{ tokenToString(token) }' expression after parentheses.`)
                 state.Position.Offset += 1 -- skip closing parens
                 state.Position.Column += 1
             elseif nextTk.Type == "..." then
@@ -1088,7 +1100,7 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
                     }, token)
                 end
             else
-                inner = parseExpression(state, math.huge) or invalidExpr(state, `Got end-of-file parsing '{ token.Type }' expression.`)
+                inner = parseExpression(state, math.huge) or invalidExpr(state, `Got end-of-file parsing '{ tokenToString(token) }' expression.`)
             end
 
             local negation = ex({
@@ -1140,7 +1152,7 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
             local closingTk = nextToken(state)
 
             if closingTk.Type ~= "]" then
-                state.Report(`Expected closing square brackets for variadic argument selector, got { closingTk.Type } instead.`, closingTk)
+                state.Report(`Expected closing square brackets for variadic argument selector, got '{ tokenToString(closingTk) }' instead.`, closingTk)
             end
 
             return maybeCombineWithBinaryOperation(state, ex({
@@ -1155,14 +1167,14 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
     elseif token.Type == "(" then
         local inner = parseExpression(state)
         local parentheses = nextToken(state)
-        assert(parentheses.Type == ")", `Expected closing parentheses, got { parentheses.Type }`)
+        assert(parentheses.Type == ")", `Expected closing parentheses, got '{ tokenToString(parentheses) }'`)
 
         return inner
 
     elseif token.Type == "EndOfFile" then
         return nil
     else
-        state.Report(`Unexpected '{ token.Type }'.`, token)
+        state.Report(`Unexpected '{ tokenToString(token) }'.`, token)
 
         return ex({
             Type = "InvalidSyntax",

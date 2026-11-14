@@ -1693,6 +1693,7 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
                         replacement = genericType()
                         table.insert(state.Generics, replacement)
                     else
+                        -- TODO add explanatory snippet for this branch...
                         if logInference then
                             print(`{ typeToString(ty, nil, true) } upper bound '{ typeToString(ty.UpperBound) }' will be clipped for intersection with '{ typeToString(previous) }'`)
                         end
@@ -1708,7 +1709,7 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
                         table.insert(state.Generics, replacement)
                     else
                         if logInference then
-                            print(`{ typeToString(ty, nil, true) } upper bound '{ typeToString(ty.UpperBound) }' will be clipped`)
+                            print(`{ typeToString(ty, nil, true) } will be clipped to its upper bound '{ typeToString(ty.UpperBound) }' even though it appears in an invariant position`)
                         end
 
                         replacement = ty.UpperBound

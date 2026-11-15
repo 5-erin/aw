@@ -2584,11 +2584,12 @@ type TypeFunction = {
     read TryReduce: ({ read Type }) -> ReductionResult,
 }
 
-local typeFunctionsStuckOnTypeFunctions: { [Type]: { Type } } = {}
+-- local typeFunctionsStuckOnTypeFunctions: { [Type]: { Type } } = {}
 
 local function stick(typeFunction: TypeFunction, me: Type, ty: Type): Stuck | false
-    if ty.Kind == "Generic" and not typeFunction.CanReduceGenerics then
+    if (ty.Kind == "Generic" and not typeFunction.CanReduceGenerics) or ty.Kind == "PendingExpansion" then
         return stuck()
+    --[[
     elseif ty.Kind == "PendingExpansion" then
         if typeFunctionsStuckOnTypeFunctions[ty] then
             table.insert(typeFunctionsStuckOnTypeFunctions[ty], me)
@@ -2597,6 +2598,7 @@ local function stick(typeFunction: TypeFunction, me: Type, ty: Type): Stuck | fa
         end
 
         return stuck()
+    ]]--
     else
         return false
     end

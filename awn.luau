@@ -1834,8 +1834,22 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
         end
     elseif ty.Kind == "Negation" then
         gatherFreeTypeSubstitutions(state, ty.Negated, `negation of { name }`)
+    elseif ty.Kind == "PendingExpansion" then
+        local prevPolarity = state.Polarity
+
+        state.Polarity = "Positive"
+        for i, argument in ty.Arguments do
+            gatherFreeTypeSubstitutions(state, argument, `argument #{ i } of { name }`)
+        end
+
+        state.Polarity = "Negative"
+        for i, argument in ty.Arguments do
+            gatherFreeTypeSubstitutions(state, argument, `argument #{ i } of { name }`)
+        end
+
+        state.Polarity = prevPolarity
     elseif ty.Kind == "unknown" or ty.Kind == "never" or ty.Kind == "error" or ty.Kind == "Primitive"
-        or ty.Kind == "PendingExpansion" or ty.Kind == "Generic" or ty.Kind == "Singleton"
+        or ty.Kind == "Generic" or ty.Kind == "Singleton"
     then
         -- Nothing.
     else
@@ -1939,7 +1953,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
     elseif expr.Type == "List" then
-        local itemsTy = if expected and expected.Kind == "List" then expected.Items else freeType()
+        local itemsTy = if expected and expected.Kind == "List" and expected.Items.Kind ~= "Generic" then expected.Items else freeType()
 
         for _, item in expr.List do
             local currentItemTy = infer(state, item, itemsTy) or errorReport(`Expression does not return a value.`, item.Position)
@@ -2426,6 +2440,10 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
     elseif expr.Type == "TypeAliasDeclaration" then
+        if typeEnv[expr.Name] then
+            return errorReport(`Cannot re-define type '{ expr.Name }'.`, expr.Position)
+        end
+
         local ty = typeAnnotationToType(expr.Position, expr.Value)
         ty.AliasName = expr.Name
 
@@ -2440,7 +2458,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
     end
 end
 
-function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnotation): Type
+local function typeAnnotationToType_(position: caw.Position, annotation: caw.TypeAnnotation): Type
     if annotation.Kind == "Error" then
         return errorType()
     elseif annotation.Kind == "Unit" then
@@ -2454,7 +2472,7 @@ function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnota
             return errorReport(`Unknown type '{ annotation.Reference }'`, position)
         end
     elseif annotation.Kind == "List" then
-        return listType(typeAnnotationToType(position, annotation.Items))
+        return listType(typeAnnotationToType_(position, annotation.Items))
 
     elseif annotation.Kind == "Singleton" then
         return singletonType(annotation.Value)
@@ -2469,37 +2487,37 @@ function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnota
         local gens = table.create<<Type>>(#annotation.Generics)
 
         for i, gen in annotation.Generics do
-            gens[i] = typeAnnotationToType(position, gen)
+            gens[i] = typeAnnotationToType_(position, gen)
         end
 
         local params = table.create<<Type>>(#annotation.Parameters)
 
         for i, param in annotation.Parameters do
-            params[i] = typeAnnotationToType(position, param)
+            params[i] = typeAnnotationToType_(position, param)
         end
 
-        return functionType(gens, params, neverType(), if annotation.Returns then typeAnnotationToType(position, annotation.Returns) else nil)
+        return functionType(gens, params, neverType(), if annotation.Returns then typeAnnotationToType_(position, annotation.Returns) else nil)
 
     elseif annotation.Kind == "AliasInstantiation" then
         local arguments = table.create<<Type>>(#annotation.Arguments)
 
         for i, a in annotation.Arguments do
-            arguments[i] = typeAnnotationToType(position, a)
+            arguments[i] = typeAnnotationToType_(position, a)
         end
 
-        return reduceTypeFunctions(pendingExpansionType(annotation.Name, arguments))
+        return pendingExpansionType(annotation.Name, arguments)
 
     elseif annotation.Kind == "Negation" then
         return makeType{
             Kind = "Negation",
-            Negated = typeAnnotationToType(position, annotation.Negated),
+            Negated = typeAnnotationToType_(position, annotation.Negated),
         }
 
     elseif annotation.Kind == "Union" then
         local components = table.create<<Type>>(#annotation.Components)
 
         for i, c in annotation.Components do
-            components[i] = typeAnnotationToType(position, c)
+            components[i] = typeAnnotationToType_(position, c)
         end
 
         return unionType(components)
@@ -2508,7 +2526,7 @@ function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnota
         local components = table.create<<Type>>(#annotation.Components)
 
         for i, c in annotation.Components do
-            components[i] = typeAnnotationToType(position, c)
+            components[i] = typeAnnotationToType_(position, c)
         end
 
         return intersectionType(components)
@@ -2516,6 +2534,13 @@ function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnota
         unreachable(annotation.Kind)
         error(`Unreachable.`)
     end
+end
+
+function typeAnnotationToType(position, annotation)
+    local ty = typeAnnotationToType_(position, annotation)
+    reduceTypeFunctions(ty)
+
+    return ty
 end
 
 local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: NormalizedType, position: caw.Position, result: SubtypingResult)
@@ -2618,11 +2643,33 @@ local function issubtypeof_TypeFunction(arguments: { read Type }): ReductionResu
     return ok(singletonType(isSubtypeOf(na, nb).Holds))
 end
 
+local function items_TypeFunction(arguments: { read Type }): ReductionResult
+    if #arguments ~= 1 then
+        return fail(`Expected exactly 1 type argument, got { #arguments } instead.`)
+    end
+
+    local norm = normalize(arguments[1])
+
+    if not isSubtypeOf(norm, normalize(primitiveType("list"))).Holds then
+        return fail(`Expected list type, got '{ typeToString(arguments[1]) }'.`)
+    end
+
+    if norm.List and norm.List.Items then
+        return ok(normalizationToType(norm.List.Items))
+    else
+        return ok(neverType())
+    end
+end
+
 local typeFunctions: { [string]: TypeFunction? } = {
     issubtypeof = {
         CanReduceGenerics = false,
         TryReduce = issubtypeof_TypeFunction,
-    }
+    },
+    items = {
+        CanReduceGenerics = false,
+        TryReduce = items_TypeFunction,
+    },
 }
 
 function reduceTypeFunctions(ty: Type): Type
@@ -2772,7 +2819,7 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     for _, k in typeAssociationsOrdered do
         local t = typeAssociations[k]
         if t then
-            print(`{ k }: { typeToString(t.Type) }`)
+            print(`{ k }: { typeToString(reduceTypeFunctions(t.Type)) }`)
         end
     end
 
@@ -2781,7 +2828,7 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     for _, k in typeEnvOrdered do
         if not builtins[k] then
             local a = assert(typeEnv[k])
-            print(`type { k } = { typeToString(a, { Alias = k }) }`)
+            print(`type { k } = { typeToString(reduceTypeFunctions(a), { Alias = k }) }`)
         end
     end
 end

@@ -2484,7 +2484,7 @@ function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnota
             arguments[i] = typeAnnotationToType(position, a)
         end
 
-        return pendingExpansionType(annotation.Name, arguments)
+        return instantiateType(pendingExpansionType(annotation.Name, arguments))
 
     elseif annotation.Kind == "Negation" then
         return makeType{
@@ -2553,6 +2553,40 @@ local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: Normaliz
     print(err)
 end
 
+type Ok<T> = { read Ok: true, read Value: T }
+type Fail<E> = { read Ok: false, read Error: E }
+type Result<T, E> = Ok<T> | Fail<E>
+
+local function ok<T>(value: T): Ok<T>
+    return {
+        Ok = true,
+        Value = value
+    }
+end
+
+local function fail<E>(error: E): Fail<E>
+    return {
+        Ok = false,
+        Error = error
+    }
+end
+
+local typeFunctions: { [string]: ({ read Type }) -> Result<Type, string> } = {}
+
+function typeFunctions.issubtypeof(arguments)
+    if #arguments ~= 2 then
+        return fail(`Expected exactly 2 type arguments, got { #arguments } instead.`)
+    end
+
+    local a = arguments[1]
+    local b = arguments[2]
+
+    local na = normalize(a)
+    local nb = normalize(b)
+
+    return ok(singletonType(isSubtypeOf(na, nb).Holds))
+end
+
 function instantiateType(ty: Type): Type
     local inited: Type
 
@@ -2562,28 +2596,18 @@ function instantiateType(ty: Type): Type
     then
         inited = ty
     elseif ty.Kind == "PendingExpansion" then
-        if ty.Name == "issubtypeof" then
-            if #ty.Arguments ~= 2 then
-                inited = errorReport(`Expected exactly 2 type arguments to 'issubtypeof' type, got { #ty.Arguments } instead.`, { Line = 1, Column = 1, Offset = 1 })
+        local handler = typeFunctions[ty.Name]
+
+        if handler then
+            local result = handler(ty.Arguments)
+
+            if result.Ok then
+                inited = result.Value
             else
-                local a = ty.Arguments[1]
-                local b = ty.Arguments[2]
-
-                local na = normalize(a)
-                local nb = normalize(b)
-
-                local result = isSubtypeOf(na, nb)
-
-                -- if result.Holds then
-                --     print(`'{ a.AliasName }' is a subtype of '{ b.AliasName }'.`)
-                -- else
-                --     print(`'{ a.AliasName }' is not a subtype of '{ b.AliasName }': { result.FailedPath }`)
-                -- end
-
-                inited = singletonType(result.Holds)
+                inited = errorReport(result.Error, { Line = 1, Column = 1, Offset = 1 })
             end
         else
-            inited = errorReport(`Tried to instantiate invalid type alias '{ ty.Name }'.`, { Line = 1, Column = 1, Offset = 1 })
+            inited = errorReport(`Invalid type function '{ ty.Name }'.`, { Line = 1, Column = 1, Offset = 1 })
         end
     elseif ty.Kind == "Negation" then
         return makeType{

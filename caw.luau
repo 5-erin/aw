@@ -584,7 +584,7 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
             local closeInstantiation, consumeCloseInstantiation = peekNextToken(state)
             local typeArguments: { TypeAnnotation } = {}
 
-            while closeInstantiation.Type ~= ">" do
+            while closeInstantiation.Type ~= ">" and closeInstantiation.Type ~= "EndOfFile" do
                 table.insert(typeArguments, parseTypeAnnotation(state))
 
                 consumeOptionalComma(state)

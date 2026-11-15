@@ -140,6 +140,8 @@ type NormalizedType = {
     Generic: { [Type]: NormalizedType }?,
     -- Union of free types.  Key is the free type, value is what it intersects with (`unknown` normally).
     Free: { [Type]: NormalizedType }?,
+    -- Union of Pending Expansion types.
+    Pending: { Type }?,
 }
 
 local typeToString
@@ -480,9 +482,25 @@ local function unionNormalizedType(n: NormalizedType, with: NormalizedType)
 
         n.Free = frees
     end
+
+    if with.Pending then
+        if n.Pending then
+            for _, pending in with.Pending do
+                if not table.find(n.Pending, pending) then
+                    table.insert(n.Pending, pending)
+                end
+            end
+        else
+            n.Pending = table.clone(with.Pending)
+        end
+    end
 end
 
 local function intersectNormalizedType(n: NormalizedType, with: NormalizedType)
+    if isUnknown(with) then
+        return
+    end
+
     n.Error = n.Error or with.Error
     n.Nil = n.Nil and with.Nil
     n.Number = n.Number and with.Number
@@ -568,6 +586,18 @@ local function intersectNormalizedType(n: NormalizedType, with: NormalizedType)
             intersectNormalizedType(intersect, with)
         end
     end
+
+    if with.Pending then
+        if not n.Pending then
+            n.Pending = table.clone(with.Pending)
+        else
+            for i = #n.Pending, 1, -1 do
+                if not table.find(with.Pending, n.Pending[i]) then
+                    table.remove(n.Pending, i)
+                end
+            end
+        end
+    end
 end
 
 local function normalize_(ty: Type, seen: { [Type]: NormalizedType }): NormalizedType
@@ -634,9 +664,7 @@ local function normalize_(ty: Type, seen: { [Type]: NormalizedType }): Normalize
         }
 
     elseif ty.Kind == "PendingExpansion" then
-        toUnknown(n)
-        n.Error = true
-        print(`Cannot normalize pending expansions.`)
+        n.Pending = { ty }
 
     elseif ty.Kind == "Negation" then
         n = normalize_(ty.Negated, seen)
@@ -1193,6 +1221,18 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         end
     end
 
+    if a.Pending then
+        if b.Pending then
+            for _, pending in a.Pending do
+                if not table.find(b.Pending, pending) then
+                    return subtypeFailure(`Unexpected '{ typeToString(pending) }'`)
+                end
+            end
+        else
+            return subtypeFailure(`Not pending.`)
+        end
+    end
+
     return subtypeSuccess(requiredChanges)
 end
 
@@ -1515,6 +1555,10 @@ function normalizationToType(n: NormalizedType): Type
             else
                 table.insert(t, unionType(frees))
             end
+        end
+
+        if n.Pending then
+            table.move(n.Pending, 1, #n.Pending, #t, t)
         end
     end
 
@@ -2629,8 +2673,10 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     print("")
 
     for _, k in typeAssociationsOrdered do
-        local t = assert(typeAssociations[k])
-        print(`{ k }: { typeToString(t.Type) }`)
+        local t = typeAssociations[k]
+        if t then
+            print(`{ k }: { typeToString(t.Type) }`)
+        end
     end
 
     print("")

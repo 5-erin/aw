@@ -2587,7 +2587,7 @@ type TypeFunction = {
 local typeFunctionsStuckOnTypeFunctions: { [Type]: { Type } } = {}
 
 local function stick(typeFunction: TypeFunction, me: Type, ty: Type): Stuck | false
-    if ty.Kind == "Generic" and typeFunction.CanReduceGenerics then
+    if ty.Kind == "Generic" and not typeFunction.CanReduceGenerics then
         return stuck()
     elseif ty.Kind == "PendingExpansion" then
         if typeFunctionsStuckOnTypeFunctions[ty] then
@@ -2637,14 +2637,19 @@ function reduceTypeFunctions(ty: Type): Type
         local typeFunction = typeFunctions[ty.Name]
 
         if typeFunction then
-            for _, argument in ty.Arguments do
+            local arguments = table.create<<Type>>(#ty.Arguments)
+
+            for i, argument in ty.Arguments do
+                argument = reduceTypeFunctions(argument)
+                arguments[i] = argument
+
                 if stick(typeFunction, ty, argument) then
                     log(`Stuck type function: '{ typeToString(ty) }' (on '{ typeToString(argument) }')`)
                     return ty
                 end
             end
 
-            local result = typeFunction.TryReduce(ty.Arguments)
+            local result = typeFunction.TryReduce(arguments)
 
             if result.State == "Ok" then
                 log(`Reduction succeeded: { typeToString(ty) } => { typeToString(result.Value) }`)

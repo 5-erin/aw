@@ -340,6 +340,7 @@ local function toNever(n: NormalizedType)
     n.Function = nil
     n.Generic = nil
     n.Free = nil
+    n.Pending = nil
 end
 
 local function toUnknown(n: NormalizedType)
@@ -352,12 +353,14 @@ local function toUnknown(n: NormalizedType)
     n.Function = {}
     n.Generic = nil
     n.Free = nil
+    n.Pending = nil
 end
 
 local function isNever(n: NormalizedType)
     return not n.Nil and not n.Boolean
         and not n.Number and not n.String and not n.List
         and not n.Function and not n.Generic and not n.Free
+        and not n.Pending
 end
 
 local function isUnknown(n: NormalizedType)
@@ -1363,7 +1366,7 @@ function typeToString(ty: TypeData, tsopts: ToStringOptions?): string
             arguments[i] = typeToString(a, opts)
         end
 
-        return `{ ty.Name }<{ table.concat(arguments, ", ") }> => { typeToString(instantiateType(ty :: Type), opts) }`
+        return `{ ty.Name }<{ table.concat(arguments, ", ") }>`
 
     elseif ty.Kind == "Negation" then
         local inner = typeToString(ty.Negated, opts)
@@ -2553,27 +2556,35 @@ local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: Normaliz
     print(err)
 end
 
-type Ok<T> = { read Ok: true, read Value: T }
-type Fail<E> = { read Ok: false, read Error: E }
-type Result<T, E> = Ok<T> | Fail<E>
+type Ok<T> = { read State: "Ok", read Value: T }
+type Stuck = { read State: "Stuck" }
+type Fail<E> = { read State: "Failed", read Error: E }
+type ReductionResult<T, E> = Ok<T> | Stuck | Fail<E>
 
 local function ok<T>(value: T): Ok<T>
     return {
-        Ok = true,
+        State = "Ok",
         Value = value
     }
 end
 
+local function stuck()
+    return { State = "Stuck" }
+end
+
 local function fail<E>(error: E): Fail<E>
     return {
-        Ok = false,
+        State = "Failed",
         Error = error
     }
 end
 
-local typeFunctions: { [string]: ({ read Type }) -> Result<Type, string> } = {}
+type TypeFunction = {
+    read CanReduceGenerics: boolean,
+    read TryReduce: ({ read Type }) -> ReductionResult<Type, string>,
+}
 
-function typeFunctions.issubtypeof(arguments)
+local function issubtypeof_TypeFunction(arguments: { read Type }): ReductionResult<Type, string>
     if #arguments ~= 2 then
         return fail(`Expected exactly 2 type arguments, got { #arguments } instead.`)
     end
@@ -2587,6 +2598,13 @@ function typeFunctions.issubtypeof(arguments)
     return ok(singletonType(isSubtypeOf(na, nb).Holds))
 end
 
+local typeFunctions: { [string]: TypeFunction? } = {
+    issubtypeof = {
+        CanReduceGenerics = false,
+        TryReduce = issubtypeof_TypeFunction,
+    }
+}
+
 function instantiateType(ty: Type): Type
     local inited: Type
 
@@ -2596,15 +2614,29 @@ function instantiateType(ty: Type): Type
     then
         inited = ty
     elseif ty.Kind == "PendingExpansion" then
-        local handler = typeFunctions[ty.Name]
+        local typeFunction = typeFunctions[ty.Name]
 
-        if handler then
-            local result = handler(ty.Arguments)
+        if typeFunction then
+            if not typeFunction.CanReduceGenerics then
+                for _, argument in ty.Arguments do
+                    if argument.Kind == "Generic" then
+                        log(`Stuck type function: '{ typeToString(ty) }' (on '{ typeToString(argument) }')`)
+                        return ty
+                    end
+                end
+            end
 
-            if result.Ok then
+            local result = typeFunction.TryReduce(ty.Arguments)
+
+            if result.State == "Ok" then
                 inited = result.Value
-            else
+            elseif result.State == "Stuck" then
+                log(`Type function stuck on reduction: '{ typeToString(ty) }'`)
+                inited = ty
+            elseif result.State == "Failed" then
                 inited = errorReport(result.Error, { Line = 1, Column = 1, Offset = 1 })
+            else
+                unreachable(result.State)
             end
         else
             inited = errorReport(`Invalid type function '{ ty.Name }'.`, { Line = 1, Column = 1, Offset = 1 })

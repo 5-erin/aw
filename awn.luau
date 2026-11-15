@@ -1248,7 +1248,7 @@ end
 
 local genericTypeNameCount = 0
 local freeTypeNameCount = 0
-local instantiateType
+local reduceTypeFunctions
 local typeEnv: { [string]: Type? }
 
 type ToStringSeen = {
@@ -1893,7 +1893,7 @@ function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type 
     end
 
     assert(#newGens == 0)
-    return substituteAllIn(fn, substitutions.Substitutions, {}), erroneous, ftyToGeneric
+    return reduceTypeFunctions(substituteAllIn(fn, substitutions.Substitutions, {})), erroneous, ftyToGeneric
 end
 
 local function infer(state: InferenceState, expr: caw.Expression, expected: Type?): Type?
@@ -2487,7 +2487,7 @@ function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnota
             arguments[i] = typeAnnotationToType(position, a)
         end
 
-        return instantiateType(pendingExpansionType(annotation.Name, arguments))
+        return reduceTypeFunctions(pendingExpansionType(annotation.Name, arguments))
 
     elseif annotation.Kind == "Negation" then
         return makeType{
@@ -2605,15 +2605,17 @@ local typeFunctions: { [string]: TypeFunction? } = {
     }
 }
 
-function instantiateType(ty: Type): Type
+function reduceTypeFunctions(ty: Type): Type
     local inited: Type
 
     if ty.Kind == "error" or ty.Kind == "never" or ty.Kind == "unknown"
         or ty.Kind == "Primitive" or ty.Kind == "Singleton" or ty.Kind == "Generic"
-        or ty.Kind == "Free" or ty.Kind == "Function" or ty.Kind == "List"
+        or ty.Kind == "Free"
     then
         inited = ty
     elseif ty.Kind == "PendingExpansion" then
+        log(`Trying to reduce '{ typeToString(ty) }'`)
+
         local typeFunction = typeFunctions[ty.Name]
 
         if typeFunction then
@@ -2629,6 +2631,7 @@ function instantiateType(ty: Type): Type
             local result = typeFunction.TryReduce(ty.Arguments)
 
             if result.State == "Ok" then
+                log(`Reduction succeeded: { typeToString(ty) } => { typeToString(result.Value) }`)
                 inited = result.Value
             elseif result.State == "Stuck" then
                 log(`Type function stuck on reduction: '{ typeToString(ty) }'`)
@@ -2644,7 +2647,7 @@ function instantiateType(ty: Type): Type
     elseif ty.Kind == "Negation" then
         return makeType{
             Kind = "Negation",
-            Negated = instantiateType(ty.Negated),
+            Negated = reduceTypeFunctions(ty.Negated),
         }
 
     elseif ty.Kind == "Union" then
@@ -2652,7 +2655,7 @@ function instantiateType(ty: Type): Type
         local changed = false
 
         for i, c in ty.Components do
-            local new = instantiateType(c)
+            local new = reduceTypeFunctions(c)
             components[i] = new
 
             if new ~= c then
@@ -2670,7 +2673,7 @@ function instantiateType(ty: Type): Type
         local changed = false
 
         for i, c in ty.Components do
-            local new = instantiateType(c)
+            local new = reduceTypeFunctions(c)
             components[i] = new
 
             if new ~= c then
@@ -2683,6 +2686,21 @@ function instantiateType(ty: Type): Type
         else
             inited = ty
         end
+    elseif ty.Kind == "List" then
+        inited = listType(reduceTypeFunctions(ty.Items))
+    elseif ty.Kind == "Function" then
+        local params = table.create<<Type>>(#ty.Parameters)
+
+        for i, param in ty.Parameters do
+            params[i] = reduceTypeFunctions(param)
+        end
+
+        inited = functionType(
+            ty.Generics,
+            params,
+            reduceTypeFunctions(ty.Variadic),
+            if ty.Returns then reduceTypeFunctions(ty.Returns) else nil
+        )
     else
         unreachable(ty.Kind)
         error(`Unreachable.`)
@@ -2697,8 +2715,8 @@ function check(inferred: Type, annotation: Type, position: caw.Position, printNo
         return
     end
 
-    local normalizedInference = normalize(instantiateType(inferred))
-    local normalizedAnnotation = normalize(instantiateType(annotation))
+    local normalizedInference = normalize(inferred)
+    local normalizedAnnotation = normalize(annotation)
 
     local subtypeResult = isSubtypeOf(normalizedInference, normalizedAnnotation)
 

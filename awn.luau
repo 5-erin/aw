@@ -2556,23 +2556,23 @@ local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: Normaliz
     print(err)
 end
 
-type Ok<T> = { read State: "Ok", read Value: T }
+type Ok = { read State: "Ok", read Value: Type }
 type Stuck = { read State: "Stuck" }
-type Fail<E> = { read State: "Failed", read Error: E }
-type ReductionResult<T, E> = Ok<T> | Stuck | Fail<E>
+type Fail = { read State: "Failed", read Error: string }
+type ReductionResult = Ok | Stuck | Fail
 
-local function ok<T>(value: T): Ok<T>
+local function ok(value: Type): Ok
     return {
         State = "Ok",
         Value = value
     }
 end
 
-local function stuck()
+local function stuck(): Stuck
     return { State = "Stuck" }
 end
 
-local function fail<E>(error: E): Fail<E>
+local function fail(error: string): Fail
     return {
         State = "Failed",
         Error = error
@@ -2581,10 +2581,28 @@ end
 
 type TypeFunction = {
     read CanReduceGenerics: boolean,
-    read TryReduce: ({ read Type }) -> ReductionResult<Type, string>,
+    read TryReduce: ({ read Type }) -> ReductionResult,
 }
 
-local function issubtypeof_TypeFunction(arguments: { read Type }): ReductionResult<Type, string>
+local typeFunctionsStuckOnTypeFunctions: { [Type]: { Type } } = {}
+
+local function stick(typeFunction: TypeFunction, me: Type, ty: Type): Stuck | false
+    if ty.Kind == "Generic" and typeFunction.CanReduceGenerics then
+        return stuck()
+    elseif ty.Kind == "PendingExpansion" then
+        if typeFunctionsStuckOnTypeFunctions[ty] then
+            table.insert(typeFunctionsStuckOnTypeFunctions[ty], me)
+        else
+            typeFunctionsStuckOnTypeFunctions[ty] = { me }
+        end
+
+        return stuck()
+    else
+        return false
+    end
+end
+
+local function issubtypeof_TypeFunction(arguments: { read Type }): ReductionResult
     if #arguments ~= 2 then
         return fail(`Expected exactly 2 type arguments, got { #arguments } instead.`)
     end
@@ -2619,12 +2637,10 @@ function reduceTypeFunctions(ty: Type): Type
         local typeFunction = typeFunctions[ty.Name]
 
         if typeFunction then
-            if not typeFunction.CanReduceGenerics then
-                for _, argument in ty.Arguments do
-                    if argument.Kind == "Generic" then
-                        log(`Stuck type function: '{ typeToString(ty) }' (on '{ typeToString(argument) }')`)
-                        return ty
-                    end
+            for _, argument in ty.Arguments do
+                if stick(typeFunction, ty, argument) then
+                    log(`Stuck type function: '{ typeToString(ty) }' (on '{ typeToString(argument) }')`)
+                    return ty
                 end
             end
 

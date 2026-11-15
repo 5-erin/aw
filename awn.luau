@@ -50,8 +50,8 @@ type FunctionType = {
     read Returns: Type?,
 }
 
--- Types of the form `T<U>`, where they can't resolve immediately but instead
--- need to be "expanded".
+-- Types of the form `T<U>`, where they may have generics that need to be substituted,
+-- or are type functions.
 type PendingExpansionType = {
     read Kind: "PendingExpansion",
     read Name: string,
@@ -1264,7 +1264,7 @@ type ToStringOptions = {
 function typeToString(ty: TypeData, tsopts: ToStringOptions?): string
     local opts: ToStringOptions = tsopts or {}
 
-    if (ty :: Type).AliasName and ty.AliasName ~= opts.Alias then
+    if (ty :: Type).AliasName and ty.AliasName ~= opts.Alias and ty.Kind ~= "PendingExpansion" then
         return ty.AliasName
     end
 
@@ -1561,7 +1561,7 @@ function normalizationToType(n: NormalizedType): Type
         end
 
         if n.Pending then
-            table.move(n.Pending, 1, #n.Pending, #t, t)
+            table.move(n.Pending, 1, #n.Pending, #t + 1, t)
         end
     end
 
@@ -1600,6 +1600,8 @@ local typeAssociations: { [string]: { Expression: caw.Expression?, Type: Type }?
         Type = functionType({}, { unknownType() }, neverType(), primitiveType("string")),
     }
 }
+-- The generics that a type alias is parameterized over.
+local typeEnvGenericParameters: { [Type]: { read Type }? } = {}
 local typeEnvOrdered: { string } = {}
 local typeAssociationsOrdered = {}
 
@@ -1611,6 +1613,7 @@ local check
 local function subtypingRelation(sub: Type, super: Type): { Type }
     log(`Relation: '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
 
+    sub, super = reduceTypeFunctions(sub), reduceTypeFunctions(super)
     local result = isSubtypeOf(normalize(sub), normalize(super))
 
     if result.Holds then
@@ -1623,6 +1626,7 @@ end
 -- `subtypingRelation`, but report error if relation does not hold.
 local function constrainSubtype(state: InferenceState, position: caw.Position, sub: Type, super: Type)
     log(`{ position.Line }:{ position.Column }: Constraining:`)
+    sub, super = reduceTypeFunctions(sub), reduceTypeFunctions(super)
 
     local erroneous = subtypingRelation(sub, super)
 
@@ -2444,11 +2448,34 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             return errorReport(`Cannot re-define type '{ expr.Name }'.`, expr.Position)
         end
 
+        local gens = nil
+
+        if #expr.Generics > 0 then
+            gens = table.create<<Type>>(#expr.Generics)
+
+            for i, gen in expr.Generics do
+                assert(gen.Kind == "Generic")
+
+                local genTy = typeAnnotationToType(expr.Position, gen)
+                gens[i] = genTy
+                typeEnv[gen.Name] = genTy
+            end
+        end
+
         local ty = typeAnnotationToType(expr.Position, expr.Value)
+        typeEnvGenericParameters[ty] = gens
         ty.AliasName = expr.Name
+
+        if gens then
+            for _, genTy in gens do
+                assert(genTy.Kind == "Generic")
+                typeEnv[genTy.Name] = nil
+            end
+        end
 
         typeEnv[expr.Name] = ty
         table.insert(typeEnvOrdered, expr.Name)
+
         return errorType()
     elseif expr.Type == "InvalidSyntax" then
         return errorType()
@@ -2462,12 +2489,16 @@ local function typeAnnotationToType_(position: caw.Position, annotation: caw.Typ
     if annotation.Kind == "Error" then
         return errorType()
     elseif annotation.Kind == "Unit" then
-        return errorReport(`Unexpected '()'.`, position)
+        return errorReport(`'()' is only valid as a function return type annotation.`, position)
     elseif annotation.Kind == "Reference" then
         local ty = typeEnv[annotation.Reference]
 
         if ty then
-            return ty
+            if typeEnvGenericParameters[ty] then
+                return errorReport(`'{ annotation.Reference }' requires type arguments.`, position)
+            else
+                return ty
+            end
         else
             return errorReport(`Unknown type '{ annotation.Reference }'`, position)
         end
@@ -2605,14 +2636,14 @@ local function fail(error: string): Fail
 end
 
 type TypeFunction = {
-    read CanReduceGenerics: boolean,
-    read TryReduce: ({ read Type }) -> ReductionResult,
+    read canReduceGenerics: boolean,
+    read tryReduce: ({ read Type }) -> ReductionResult,
 }
 
 -- local typeFunctionsStuckOnTypeFunctions: { [Type]: { Type } } = {}
 
 local function stick(typeFunction: TypeFunction, me: Type, ty: Type): Stuck | false
-    if (ty.Kind == "Generic" and not typeFunction.CanReduceGenerics) or ty.Kind == "PendingExpansion" then
+    if (ty.Kind == "Generic" and not typeFunction.canReduceGenerics) or ty.Kind == "PendingExpansion" then
         return stuck()
     --[[
     elseif ty.Kind == "PendingExpansion" then
@@ -2663,12 +2694,12 @@ end
 
 local typeFunctions: { [string]: TypeFunction? } = {
     issubtypeof = {
-        CanReduceGenerics = false,
-        TryReduce = issubtypeof_TypeFunction,
+        canReduceGenerics = false,
+        tryReduce = issubtypeof_TypeFunction,
     },
     items = {
-        CanReduceGenerics = false,
-        TryReduce = items_TypeFunction,
+        canReduceGenerics = false,
+        tryReduce = items_TypeFunction,
     },
 }
 
@@ -2684,6 +2715,7 @@ function reduceTypeFunctions(ty: Type): Type
         log(`Trying to reduce '{ typeToString(ty) }'`)
 
         local typeFunction = typeFunctions[ty.Name]
+        local aliasing = typeEnv[ty.Name]
 
         if typeFunction then
             local arguments = table.create<<Type>>(#ty.Arguments)
@@ -2698,7 +2730,7 @@ function reduceTypeFunctions(ty: Type): Type
                 end
             end
 
-            local result = typeFunction.TryReduce(arguments)
+            local result = typeFunction.tryReduce(arguments)
 
             if result.State == "Ok" then
                 log(`Reduction succeeded: { typeToString(ty) } => { typeToString(result.Value) }`)
@@ -2711,11 +2743,30 @@ function reduceTypeFunctions(ty: Type): Type
             else
                 unreachable(result.State)
             end
+        elseif aliasing then
+            local generics = typeEnvGenericParameters[aliasing]
+
+            if generics then
+                if #generics == #ty.Arguments then
+                    local substitutions = {}
+
+                    for i, gen in generics do
+                        substitutions[gen] = ty.Arguments[i]
+                    end
+
+                    inited = substituteAllIn(aliasing, substitutions, {})
+                    inited = reduceTypeFunctions(inited)
+                else
+                    inited = errorReport(`'{ ty.Name }' expects { #generics } type argument(s), but { #ty.Arguments } were given.`, { Line = 1, Column = 1, Offset = 1 })
+                end
+            else
+                inited = errorReport(`'{ ty.Name }' does not accept type arguments.`, { Line = 1, Column = 1, Offset = 1 })
+            end
         else
             inited = errorReport(`Invalid type function '{ ty.Name }'.`, { Line = 1, Column = 1, Offset = 1 })
         end
     elseif ty.Kind == "Negation" then
-        return makeType{
+        inited = makeType{
             Kind = "Negation",
             Negated = reduceTypeFunctions(ty.Negated),
         }
@@ -2828,7 +2879,20 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     for _, k in typeEnvOrdered do
         if not builtins[k] then
             local a = assert(typeEnv[k])
-            print(`type { k } = { typeToString(reduceTypeFunctions(a), { Alias = k }) }`)
+            local gens = typeEnvGenericParameters[a]
+            local gensString = ""
+
+            if gens then
+                local gensStr = table.create<<string>>(#gens)
+
+                for i, gen in gens do
+                    gensStr[i] = typeToString(gen)
+                end
+
+                gensString = `<{ table.concat(gensStr, ", ") }>`
+            end
+
+            print(`type { k }{ gensString } = { typeToString(reduceTypeFunctions(a), { Alias = k }) }`)
         end
     end
 end

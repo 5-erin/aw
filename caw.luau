@@ -291,6 +291,7 @@ type ExpressionData =
     | {
         read Type: "TypeAliasDeclaration",
         read Name: string,
+        read Generics: { read TypeAnnotation },
         read Value: TypeAnnotation,
       }
     | {
@@ -927,15 +928,25 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
                 return invalidExpr(state, `Expected identifier after 'type', got '{ tokenToString(name) }' instead.`)
             end
 
-            local equals = nextToken(state)
+            local generics: { read GenericTypeAnnotation } = {}
+            local equalsOrGenericList = nextToken(state)
 
-            if equals.Type ~= "=" then
-                return invalidExpr(state, `Expected '=' after type alias name, got '{ tokenToString(equals) }' instead.`)
+            if equalsOrGenericList.Type == "<" then
+                generics = parseGenericParameterList(state)
+
+                local equals = nextToken(state)
+
+                if equals.Type ~= "=" then
+                    invalidExpr(state, `Expected '=' after generic parameter list, got '{ tokenToString(equals) }' instead.`)
+                end
+            elseif equalsOrGenericList.Type ~= "=" then
+                return invalidExpr(state, `Expected '=' or '<' after type alias name, got '{ tokenToString(equalsOrGenericList) }' instead.`)
             end
 
             return ex({
                 Type = "TypeAliasDeclaration",
                 Name = name.Identifier,
+                Generics = generics,
                 Value = parseTypeAnnotation(state),
             }, token)
         elseif token.Keyword == "nil" then

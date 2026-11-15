@@ -148,6 +148,12 @@ local function unreachable(x: never): never
     error(`Unexpected branch with value '{ x }' ({ typeof(x) }), this is an internal error.`)
 end
 
+local function log(message: string)
+    if logInference then
+        print(message)
+    end
+end
+
 local function makeType(ty: TypeData): Type
     local t = ty :: Type
     -- `AliasName`.
@@ -797,10 +803,7 @@ local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Typ
         local consistencyResult = isSubtypeOf(normalize(change.Target.LowerBound), normalize(change.Target.UpperBound))
 
         if not consistencyResult.Holds then
-            if logInference then
-                print(`Free type bounds mismatch for '{ typeToString(change.Target) }': '{ typeToString(change.Target.LowerBound) }' </: '{ typeToString(change.Target.UpperBound) }' - { consistencyResult.FailedPath }`)
-            end
-
+            log(`Free type bounds mismatch for '{ typeToString(change.Target) }': '{ typeToString(change.Target.LowerBound) }' </: '{ typeToString(change.Target.UpperBound) }' - { consistencyResult.FailedPath }`)
             erroneousSet[change.Target] = true
         end
     end
@@ -991,10 +994,12 @@ local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunct
                     if paramResult.Holds then
                         table.move(paramResult.RequiredBoundsChanges, 1, #paramResult.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
                     else
+                        local paramStr = normalizationToString(cb.Parameters[i])
                         table.insert(
                             failed,
-                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not accept parameter #{ i } '{ normalizationToString(cb.Parameters[i]) }': { paramResult.FailedPath }`
+                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not accept parameter #{ i } '{ paramStr }': { paramResult.FailedPath }`
                         )
+
                         paramsMatched = false
                     end
                 end
@@ -1548,7 +1553,7 @@ local typeAssociations: { [string]: { Expression: caw.Expression?, Type: Type }?
         Type = functionType({}, { unknownType() }, neverType(), primitiveType("string")),
     }
 }
-local typeEnvOrdered = {}
+local typeEnvOrdered: { string } = {}
 local typeAssociationsOrdered = {}
 
 local typeAnnotationToType
@@ -1557,9 +1562,7 @@ local check
 -- `Sub <: Super`. Can modify bounds of either if either are Free.
 -- Returns the list of free types with erroneous bounds, if there were any.
 local function subtypingRelation(sub: Type, super: Type): { Type }
-    if logInference then
-        print(`Relation: '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
-    end
+    log(`Relation: '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
 
     local result = isSubtypeOf(normalize(sub), normalize(super))
 
@@ -1572,9 +1575,7 @@ end
 
 -- `subtypingRelation`, but report error if relation does not hold.
 local function constrainSubtype(state: InferenceState, position: caw.Position, sub: Type, super: Type)
-    if logInference then
-        print(`{ position.Line }:{ position.Column }: Constraining:`)
-    end
+    log(`{ position.Line }:{ position.Column }: Constraining:`)
 
     local erroneous = subtypingRelation(sub, super)
 
@@ -1585,9 +1586,7 @@ local function constrainSubtype(state: InferenceState, position: caw.Position, s
 
     check(sub, super, position)
 
-    if logInference then
-        print("")
-    end
+    log("")
 end
 
 local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, traversed: { [Type]: true }): Type
@@ -1705,9 +1704,7 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
                         table.insert(state.Generics, replacement)
                     else
                         -- TODO add explanatory snippet for this branch...
-                        if logInference then
-                            print(`{ typeToString(ty, nil, true) } upper bound '{ typeToString(ty.UpperBound) }' will be clipped for intersection with '{ typeToString(previous) }'`)
-                        end
+                        log(`{ typeToString(ty, nil, true) } upper bound '{ typeToString(ty.UpperBound) }' will be clipped for intersection with '{ typeToString(previous) }'`)
 
                         intersectNormalizedType(normUpper, normalize(previous))
                         replacement = normalizationToType(normUpper)
@@ -1719,9 +1716,7 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
                         replacement = genericType()
                         table.insert(state.Generics, replacement)
                     else
-                        if logInference then
-                            print(`{ typeToString(ty, nil, true) } will be clipped to its upper bound '{ typeToString(ty.UpperBound) }' even though it appears in an invariant position`)
-                        end
+                        log(`{ typeToString(ty, nil, true) } will be clipped to its upper bound '{ typeToString(ty.UpperBound) }' even though it appears in an invariant position`)
 
                         replacement = ty.UpperBound
                     end
@@ -1746,14 +1741,10 @@ local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsSta
             if not previous or not state.AlwaysConcretize or sub.Kind ~= "Free" then
                 state.Substitutions[ty] = sub
             else
-                if logInference then
-                    print(`Discarding substitution { typeToString(sub) } for { typeToString(ty) } ({ state.Polarity }) because { typeToString(previous) } was already set`)
-                end
+                log(`Discarding substitution { typeToString(sub) } for { typeToString(ty) } ({ state.Polarity }) because { typeToString(previous) } was already set`)
             end
 
-            if logInference then
-                print(`{ state.Polarity } { typeToString(ty) } => { typeToString(state.Substitutions[ty]) }`)
-            end
+            log(`{ state.Polarity } { typeToString(ty) } => { typeToString(state.Substitutions[ty]) }`)
         end
 
         state.Polarities[ty] = state.Polarity
@@ -1817,10 +1808,7 @@ type InferenceState = {
 function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type }, { [Type]: Type })
     local gensToSubstitute = {}
     local ftyToGeneric = {}
-
-    if logInference then
-        print("Generic substitutions:")
-    end
+    log("Generic substitutions:")
 
     if fn.Kind == "Function" then
         for _, gen in fn.Generics do
@@ -1828,14 +1816,10 @@ function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type 
             gensToSubstitute[gen] = free
             ftyToGeneric[free] = gen
 
-            if logInference then
-                print(`* { typeToString(gen) } => { typeToString(free) }`)
-            end
+            log(`* { typeToString(gen) } => { typeToString(free) }`)
         end
 
-        if logInference then
-            print("")
-        end
+        log("")
 
         fn = functionType({}, fn.Parameters, fn.Variadic, fn.Returns)
         fn = substituteAllIn(fn, gensToSubstitute, {})
@@ -2167,9 +2151,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             AlwaysConcretize = false,
         }
 
-        if logInference then
-            print(`{ expr.Position.Line }:{ expr.Position.Column }: Eliminating free types: { typeToString(functionType(gens, params, varTy or neverType(), if typeof(retTy) == "table" then retTy else nil)) }`)
-        end
+        log(`{ expr.Position.Line }:{ expr.Position.Column }: Eliminating free types: { typeToString(functionType(gens, params, varTy or neverType(), if typeof(retTy) == "table" then retTy else nil)) }`)
 
         -- Inputs are negative.
         freeTypeSubstitutions.Polarity = "Negative"
@@ -2203,17 +2185,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             print("")
         end
 
-        local traversed = {}
-
-        -- The substitutions themselves may have types that need to be substituted.
-        --
-        -- let x = function(y, f) --> `f` would be left as `() -> 'b` unless we substitute the substitution.
-        --     y = f()
-        -- end
-        --
-        for ty, sub in freeTypeSubstitutions.Substitutions do
-            freeTypeSubstitutions.Substitutions[ty] = simplify(substituteAllIn(sub, freeTypeSubstitutions.Substitutions, traversed))
-        end
+        local traversed: { [Type]: true } = {}
 
         for i, param in params do
             params[i] = substituteAllIn(param, freeTypeSubstitutions.Substitutions, traversed)
@@ -2236,7 +2208,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         table.clear(gens)
 
         for _, gen in gensCheck do
-            if traversed[gen] then
+            assert(gen.Kind == "Generic")
+            if gen.Name or traversed[gen] then
                 table.insert(gens, gen)
             end
         end
@@ -2250,10 +2223,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             }
         end
 
-        if logInference then
-            print("")
-        end
-
+        log("")
         return fty
 
     elseif expr.Type == "Return" then
@@ -2317,10 +2287,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         local callsiteTy = functionType({}, arguments, neverType(), expected)
 
-        if logInference then
-            print(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
-        end
-
+        log(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
         fnTy = instantiateGenericsAtCallsite(fnTy, callsiteTy)
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)

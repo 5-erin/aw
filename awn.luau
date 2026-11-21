@@ -402,7 +402,7 @@ local function negate(n: NormalizedType): NormalizedType
     end
 
     -- TODO luau cast.
-    if next(n.pending :: any) ~= nil then
+    if n.pending and next(n.pending :: any) ~= nil then
         print(`Cannot negate pending types (generics, type functions, or free types.)`)
         errors = true
     end
@@ -439,7 +439,6 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
         local bSingles = bStrings.singletons
 
         if aSingles and bSingles then
-            local cofinite = aStrings.cofinite
             local singles: { [string]: true } = {}
 
             -- TODO check
@@ -455,7 +454,19 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
                 end
             end
 
-            strings = { cofinite = cofinite, singletons = singles }
+            for s, _ in bSingles do
+                if aSingles[s] then
+                    if aStrings.cofinite == bStrings.cofinite then
+                        if not bStrings.cofinite then
+                            singles[s] = true
+                        end
+                    end
+                else
+                    singles[s] = true
+                end
+            end
+
+            strings = { cofinite = false, singletons = singles }
         else
             -- `"a" | string` and `string | "a"` => `string`
             -- `(string & ~"a") | string` and `string | (string & | "a")` => `string`
@@ -674,9 +685,9 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
 end
 
 local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
-    if seen[ty] then
-        return normalize_(errorType(), {})
-    end
+    --if seen[ty] then
+    --    return normalize_(errorType(), {})
+    --end
     seen[ty] = true
 
     local errors = false
@@ -730,7 +741,7 @@ local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
                 booleans.hasFalse = true
             end
         elseif typeof(ty.Value) == "string" then
-                strings.singletons[ty.Value] = true :: true -- TODO luau cast.
+            strings.singletons[ty.Value] = true :: true -- TODO luau cast.
         else
             error(`Invalid singleton kind '{ typeof(ty.Value) }'.`)
         end
@@ -1559,7 +1570,7 @@ function normalizationToType(n: NormalizedType): Type
         elseif not isStringNever(n.strings) then
             local strs = {}
 
-            for _, s in n.strings.singletons do
+            for s, _ in n.strings.singletons do
                 local sty = singletonType(s)
 
                 if n.strings.cofinite then
@@ -2946,7 +2957,7 @@ function check(inferred: Type, annotation: Type, position: caw.Position, printNo
 
     local subtypeResult = isSubtypeOf(normalizedInference, normalizedAnnotation)
 
-    if not subtypeResult.holds then
+    if not subtypeResult.holds and not subtypeResult.errorSurpressed then
         reportMismatch(inferred, normalizedInference, annotation, normalizedAnnotation, position, subtypeResult)
     elseif printNote then
         print(`'{ typeToString(inferred) }' is a subtype of '{ typeToString(annotation) }'.`)

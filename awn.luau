@@ -386,6 +386,7 @@ end
 
 local isSubtypeOf
 local isFunctionSubtypeOf
+local isExactly
 
 local function negate(n: NormalizedType): NormalizedType
     local errors = n.errors
@@ -472,10 +473,9 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
         local bItems = b.lists.items
 
         if aItems and bItems then
-            local r1 = isSubtypeOf(aItems, bItems)
-            local r2 = isSubtypeOf(bItems, aItems)
+            local result = isExactly(aItems, bItems)
 
-            if r1.Holds and r2.Holds then
+            if result.holds then
                 lists = { items = aItems }
             else
                 -- Reading from it would be a union, writing to it would be an intersection.
@@ -599,10 +599,9 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
         local bItems = b.lists.items
 
         if aItems and bItems then
-            local r1 = isSubtypeOf(aItems, bItems)
-            local r2 = isSubtypeOf(bItems, aItems)
+            local result = isExactly(aItems, bItems)
 
-            if r1.Holds and r2.Holds then
+            if result.holds then
                 lists = { items = aItems }
             else
                 -- Reading from it would be an intersection, writing to it would be an union (I think).
@@ -627,7 +626,7 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
 
             for _, bComponent in bComponents do
                 for i, aComponent in components do
-                    if isFunctionSubtypeOf(bComponent, aComponent).Holds then
+                    if isFunctionSubtypeOf(bComponent, aComponent).holds then
                         components[i] = bComponent
                     end
                 end
@@ -792,6 +791,7 @@ end
 
 local isSupertypeOf
 local normalizationToType
+local normalizedFunctionComponentToFunctionType
 
 local function simplify(ty: Type)
     return normalizationToType(normalize(ty))
@@ -813,59 +813,46 @@ type SubtypingVariance = "Covariant" | "Contravariant" | "Invariant"
 
 type SubtypingResult =
     | {
-        read Holds: true,
-        Variance: SubtypingVariance,
-        read FailedPath: nil,
+        read holds: true,
+        read errorSurpressed: nil,
+        read failedPath: nil,
         -- Changes to free type bounds we need to make so that the relation holds.
-        read RequiredBoundsChanges: { read RequiredBoundsChange },
+        read requiredBoundsChanges: { read RequiredBoundsChange },
       }
     | {
-        read Holds: false,
-        Variance: SubtypingVariance,
-        read FailedPath: string,
+        read holds: false,
+        read errorSurpressed: boolean,
+        read failedPath: string,
       }
 
 local function subtypeSuccess(changes: { read RequiredBoundsChange }?, variance: SubtypingVariance?): SubtypingResult
     return {
-        Holds = true,
-        Variance = variance or "Covariant",
-        RequiredBoundsChanges = changes or {},
+        holds = true,
+        variance = variance or "Covariant",
+        requiredBoundsChanges = changes or {},
     }
 end
 
-local function subtypeFailure(failed, variance: SubtypingVariance?): SubtypingResult
-    return { Holds = false, Variance = variance or "Covariant", FailedPath = failed }
+-- TODO luau `surpressed` and `failed` being inferred as `unknown`?
+local function subtypeFailure(surpressed: boolean, failed: string, variance: SubtypingVariance?): SubtypingResult
+    return {
+        holds = false,
+        errorSurpressed = surpressed,
+        variance = variance or "Covariant",
+        failedPath = failed
+    }
 end
 
 local function normalizedNil()
-    local n = normalizedNever()
-    n.Nil = true
-
-    return n
+    return normalize(primitiveType("nil"))
 end
 
 local function normalizedBoolean(singleton: boolean?)
-    local n = normalizedNever()
-    local boolean = {}
-
-    if singleton ~= nil then
-        boolean.Value = singleton
-    end
-
-    n.Boolean = boolean :: any -- TODO luau cast
-    return n
+    return normalize(if singleton == nil then primitiveType("nil") else singletonType(singleton))
 end
 
 local function normalizedString(singleton: string?)
-    local n = normalizedNever()
-    local stringData = {}
-
-    if singleton ~= nil then
-        stringData.Singletons = { singleton }
-    end
-
-    n.String = stringData :: any -- TODO luau cast
-    return n
+    return normalize(if singleton == nil then primitiveType("string") else singletonType(singleton))
 end
 
 local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Type }
@@ -883,8 +870,8 @@ local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Typ
 
         local consistencyResult = isSubtypeOf(normalize(change.Target.LowerBound), normalize(change.Target.UpperBound))
 
-        if not consistencyResult.Holds then
-            log(`Free type bounds mismatch for '{ typeToString(change.Target) }': '{ typeToString(change.Target.LowerBound) }' </: '{ typeToString(change.Target.UpperBound) }' - { consistencyResult.FailedPath }`)
+        if not consistencyResult.holds then
+            log(`Free type bounds mismatch for '{ typeToString(change.Target) }': '{ typeToString(change.Target.LowerBound) }' </: '{ typeToString(change.Target.UpperBound) }' - { consistencyResult.failedPath }`)
             erroneousSet[change.Target] = true
         end
     end
@@ -897,16 +884,16 @@ local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Typ
     return erroneous
 end
 
-local function intersectApplicableReturns(components: { NormalizedFunctionComponentType }, argument: NormalizedType): NormalizedType?
+local function intersectApplicableReturns(components: { read NormalizedFunctionComponentType }, argument: NormalizedType): NormalizedType?
     local applicable = {}
 
     for _, c in components do
-        if #c.Parameters == 1 then
-            local result = isSubtypeOf(argument, c.Parameters[1])
+        if #c.parameters == 1 then
+            local result = isSubtypeOf(argument, c.parameters[1])
 
-            if result.Holds then
-                applyBoundsChanges(result.RequiredBoundsChanges)
-                table.insert(applicable, c.Return)
+            if result.holds then
+                applyBoundsChanges(result.requiredBoundsChanges)
+                table.insert(applicable, c.returns)
             end
         end
     end
@@ -918,41 +905,33 @@ local function intersectApplicableReturns(components: { NormalizedFunctionCompon
     local returned: NormalizedType = deepCopy(applicable[1])
 
     for i = 2, #applicable do
-        intersectNormalizedType(returned, applicable[i])
+        intersect(returned, applicable[i])
     end
 
     return returned
 end
 
 local function decomposeToSingletons(n: NormalizedType): { NormalizedType }?
-    if n.Number or n.List or n.Function or n.Generic or n.Free then
+    if n.numbers or n.strings.cofinite or n.lists or n.functions or n.pending then
         return nil
     end
 
     local singles = {}
 
-    if n.Nil then
+    if n.nils then
         table.insert(singles, normalizedNil())
     end
 
-    if n.Boolean then
-        if n.Boolean.Value == nil then
-            table.insert(singles, normalizedBoolean(true))
-            table.insert(singles, normalizedBoolean(false))
-        else
-            table.insert(singles, normalizedBoolean(n.Boolean.Value))
-        end
+    if n.booleans.hasTrue then
+        table.insert(singles, normalizedBoolean(true))
     end
 
-    if n.String then
-        if n.String.Singletons then
-            for _, s in n.String.Singletons do
-                table.insert(singles, normalizedString(s))
-            end
-        else
-            -- Top `string`.
-            return nil
-        end
+    if n.booleans.hasFalse then
+        table.insert(singles, normalizedBoolean(false))
+    end
+
+    for s, _ in n.strings.singletons do
+        table.insert(singles, normalizedString(s))
     end
 
     return singles
@@ -963,20 +942,20 @@ local substituteAllIn
 local instantiateGenericsAtCallsite
 
 local function normalizedFunctionComponentToString(nfc: NormalizedFunctionComponentType): string
-    local gensStrings = table.create<<string>>(#nfc.Generics)
-    local paramStrings = table.create<<string>>(#nfc.Parameters)
+    local gensStrings = table.create<<string>>(#nfc.generics)
+    local paramStrings = table.create<<string>>(#nfc.parameters)
 
-    for i, gen in nfc.Generics do
+    for i, gen in nfc.generics do
         gensStrings[i] = typeToString(gen)
     end
 
-    for i, param in nfc.Parameters do
+    for i, param in nfc.parameters do
         paramStrings[i] = normalizationToString(param)
     end
 
-    local str = `({ table.concat(paramStrings, ", ") }) -> { if nfc.Return then normalizationToString(nfc.Return) else "()" }`
+    local str = `({ table.concat(paramStrings, ", ") }) -> { if nfc.returns then normalizationToString(nfc.returns) else "()" }`
 
-    if #nfc.Generics > 0 then
+    if #nfc.generics > 0 then
         str = `<{ table.concat(gensStrings, ", ") }>` .. str
     end
 
@@ -985,39 +964,39 @@ end
 
 function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionType): SubtypingResult
     -- `((A) -> B) & ((C) -> D) & ... <: function`
-    if not b.Components then
+    if not b.components then
         return subtypeSuccess()
     end
 
     -- `function </: ((A) -> B) & ((C) -> D) & ...`
-    if not a.Components then
-        return subtypeFailure(`Unexpected 'top' function type.`)
+    if not a.components then
+        return subtypeFailure(false, `Unexpected 'top' function type.`)
     end
 
     local requiredChanges = {}
 
-    for i, cb in b.Components do
+    for i, cb in b.components do
         local singles = nil
 
-        if #cb.Parameters == 1 then
-            singles = decomposeToSingletons(cb.Parameters[1])
+        if #cb.parameters == 1 then
+            singles = decomposeToSingletons(cb.parameters[1])
         end
 
         if singles then
             for _, single in singles do
-                local car = intersectApplicableReturns(a.Components, single)
+                local car = intersectApplicableReturns(a.components, single)
 
                 if not car then
-                    return subtypeFailure(`No overload accepts '{ normalizationToString(single) }'.`)
+                    return subtypeFailure(false, `No overload accepts '{ normalizationToString(single) }'.`)
                 end
 
-                if cb.Return then
-                    local result = isSubtypeOf(car, cb.Return)
+                if cb.returns then
+                    local result = isSubtypeOf(car, cb.returns)
 
-                    if result.Holds then
-                        table.move(result.RequiredBoundsChanges, 1, #result.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
+                    if result.holds then
+                        table.move(result.requiredBoundsChanges, 1, #result.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
                     else
-                        return subtypeFailure(`With '{ normalizationToString(single) }': { result.FailedPath }`)
+                        return subtypeFailure(false, `With '{ normalizationToString(single) }': { result.failedPath }`)
                     end
                 end
             end
@@ -1025,28 +1004,22 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
             local found = false
             local failed = {}
 
-            for ica, ca in a.Components do
+            for ica, ca in a.components do
                 local signature = normalizedFunctionComponentToString(ca)
 
-                if #ca.Parameters ~= #cb.Parameters then
+                if #ca.parameters ~= #cb.parameters then
                     table.insert(failed, `'{ signature }' has a differing number of parameters.`)
                     continue
                 end
 
                 local paramsMatched = true
-                local instantiate = #ca.Generics > 0
+                local instantiate = #ca.generics > 0
                 local nonInstantiated = signature
                 local instantiationFailed = false
 
                 if instantiate then
-                    local caNorm = normalizedNever()
-                    local cbNorm = normalizedNever()
-                    caNorm.Function = { Components = { ca } }
-                    cbNorm.Function = { Components = { cb } }
-
-                    local aFn = normalizationToType(caNorm)
-                    local bFn = normalizationToType(cbNorm)
-
+                    local aFn = normalizedFunctionComponentToFunctionType(ca)
+                    local bFn = normalizedFunctionComponentToFunctionType(cb)
                     local instantiated, erroneous, ftyToGeneric = instantiateGenericsAtCallsite(aFn, bFn)
 
                     for _, free in erroneous do
@@ -1059,26 +1032,28 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                     end
 
                     local instantiatedNorm = normalize(instantiated)
-                    assert(instantiatedNorm.Function and instantiatedNorm.Function.Components and #instantiatedNorm.Function.Components > 0)
+                    assert(instantiatedNorm.functions and instantiatedNorm.functions.components and #instantiatedNorm.functions.components > 0)
 
-                    ca = instantiatedNorm.Function.Components[1]
+                    ca = instantiatedNorm.functions.components[1]
+                    -- TODO luau `ca` becoming `any` after this line
                     signature = normalizedFunctionComponentToString(ca)
+                    ca = ca :: NormalizedFunctionComponentType
                 end
 
                 if instantiationFailed then
                     continue
                 end
 
-                for i, param in ca.Parameters do
-                    local paramResult = isSupertypeOf(param, cb.Parameters[i])
+                for i, param in ca.parameters do
+                    local paramResult = isSupertypeOf(param, cb.parameters[i])
 
-                    if paramResult.Holds then
-                        table.move(paramResult.RequiredBoundsChanges, 1, #paramResult.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
+                    if paramResult.holds then
+                        table.move(paramResult.requiredBoundsChanges, 1, #paramResult.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
                     else
-                        local paramStr = normalizationToString(cb.Parameters[i])
+                        local paramStr = normalizationToString(cb.parameters[i])
                         table.insert(
                             failed,
-                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not accept parameter #{ i } '{ paramStr }': { paramResult.FailedPath }`
+                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not accept parameter #{ i } '{ paramStr }': { paramResult.failedPath }`
                         )
 
                         paramsMatched = false
@@ -1089,15 +1064,15 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                     continue
                 end
 
-                if ca.Return and cb.Return then
-                    local returnResult = isSubtypeOf(ca.Return, cb.Return)
+                if ca.returns and cb.returns then
+                    local returnResult = isSubtypeOf(ca.returns, cb.returns)
 
-                    if returnResult.Holds then
-                        table.move(returnResult.RequiredBoundsChanges, 1, #returnResult.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
+                    if returnResult.holds then
+                        table.move(returnResult.requiredBoundsChanges, 1, #returnResult.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
                     else
                         table.insert(
                             failed,
-                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not return '{ normalizationToString(cb.Return) }'.`
+                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not return '{ normalizationToString(cb.returns) }'.`
                         )
                         continue
                     end
@@ -1108,18 +1083,18 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
             end
 
             if not found then
-                local paramStrings = table.create<<string>>(#cb.Parameters)
+                local paramStrings = table.create<<string>>(#cb.parameters)
 
-                for i, param in cb.Parameters do
+                for i, param in cb.parameters do
                     paramStrings[i] = normalizationToString(param)
                 end
 
-                local signature = `({ table.concat(paramStrings, ", ") }) -> { if cb.Return then normalizationToString(cb.Return) else "()" }`
+                local signature = `({ table.concat(paramStrings, ", ") }) -> { if cb.returns then normalizationToString(cb.returns) else "()" }`
 
-                if #b.Components > 1 then
-                    return subtypeFailure(`No compatible overload was found for #{ i } '{ signature }':\n* { table.concat(failed, "\n* ") }`)
+                if #b.components > 1 then
+                    return subtypeFailure(false, `No compatible overload was found for #{ i } '{ signature }':\n* { table.concat(failed, "\n* ") }`)
                 else
-                    return subtypeFailure(`\n* { table.concat(failed, "\n* ") }`)
+                    return subtypeFailure(false, `\n* { table.concat(failed, "\n* ") }`)
                 end
             end
         end
@@ -1128,21 +1103,38 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
     return subtypeSuccess(requiredChanges)
 end
 
-function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
-    if a.Error or b.Error then
-        return subtypeSuccess()
+local function freeTypesOf(n: NormalizedType): { Type }?
+    if not n.pending then
+        return nil
     end
 
+    local frees = {}
+
+    for ty, _ in n.pending do
+        if ty.Kind == "Free" then
+            table.insert(frees, ty)
+        end
+    end
+
+    if #frees > 0 then
+        return frees
+    else
+        return nil
+    end
+end
+
+function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
     -- `unknown` is not a useful narrowing of an upper bound.
     if isUnknown(b) then
         return subtypeSuccess()
     end
 
-    if a.Free then
+    local aFrees = freeTypesOf(a)
+    if aFrees then
         -- TODO luau removing annotation causes read-write indexer mismatch error
         local changes: { RequiredBoundsChange } = {}
 
-        for free, _ in a.Free do
+        for _, free in aFrees do
             table.insert(changes, {
                 Target = free,
                 IntersectUpperWith = normalizationToType(b),
@@ -1152,15 +1144,18 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         return subtypeSuccess(changes)
     end
 
+    local surpressed = a.errors or b.errors
+
     -- `never` is a proper narrowing, that's why we want to handle it before hitting this early-out.
     if isNever(b) and not isNever(a) then
-        return subtypeFailure("Nothing is a subtype of `never` except `never` itself.")
+        return subtypeFailure(surpressed, "Nothing is a subtype of `never` except `never` itself.")
     end
 
-    if b.Free then
+    local bFrees = freeTypesOf(b)
+    if bFrees then
         local changes: { RequiredBoundsChange } = {}
 
-        for free, _ in b.Free do
+        for _, free in bFrees do
             table.insert(changes, {
                 Target = free,
                 UnionLowerWith = normalizationToType(a),
@@ -1170,130 +1165,122 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         return subtypeSuccess(changes)
     end
 
-    if a.Nil and not b.Nil then
-        return subtypeFailure("Unexpected `nil`.")
+    if a.nils and not b.nils then
+        return subtypeFailure(surpressed, "Unexpected `nil`.")
     end
 
-    if a.Boolean and not b.Boolean then
-        return subtypeFailure("Unexpected `boolean`.")
-    -- `boolean </: true` etc.
-    elseif a.Boolean and a.Boolean.Value == nil and b.Boolean and b.Boolean.Value ~= nil then
-        return subtypeFailure(`Expected exactly '{ b.Boolean.Value }', got 'boolean' instead.`)
-    elseif a.Boolean and a.Boolean.Value ~= nil and b.Boolean and b.Boolean.Value ~= nil then
-        -- `false </: true`
-        if a.Boolean.Value ~=  b.Boolean.Value then
-            return subtypeFailure(`Expected '{ b.Boolean.Value }', got '{ a.Boolean.Value }' instead.`)
-        end
+    if a.booleans.hasTrue and not b.booleans.hasTrue then
+        return subtypeFailure(surpressed, "Unexpected `true`.")
+    elseif a.booleans.hasFalse and not b.booleans.hasFalse then
+        return subtypeFailure(surpressed, "Unexpected `false`.")
     end
 
-    if a.Number and not b.Number then
-        return subtypeFailure("Unexpected `number`.")
+    if a.numbers and not b.numbers then
+        return subtypeFailure(surpressed, "Unexpected `number`.")
     end
 
-    if a.String and not b.String then
-        return subtypeFailure("Unexpected 'string'.")
     -- `string </: "a" | "b" | ...`
-    elseif a.String and not a.String.Singletons and b.String and b.String.Singletons then
-        if b.String.Cofinite then
-            return subtypeFailure(`Top 'string' includes negated types like "{ b.String.Singletons[1] }".`)
-        else
-            return subtypeFailure(`Expected string singletons such as "{ b.String.Singletons[1] }", got top 'string' instead.`)
+    if a.strings.cofinite and not b.strings.cofinite then
+        return subtypeFailure(surpressed, "Unexpected `string`.")
+    elseif not a.strings.cofinite and b.strings.cofinite then
+        for s, _ in a.strings.singletons do
+            if b.strings.singletons[s] then
+                return subtypeFailure(surpressed, `\`"{ s }"\` was excluded.`)
+            end
         end
-
-    elseif a.String and a.String.Singletons and b.String and b.String.Singletons then
-        for _, as in a.String.Singletons do
-            local found = table.find(b.String.Singletons, as) ~= nil
-
-            if found and b.String.Cofinite then
-                return subtypeFailure(`'"{ as }"' is excluded by '~"{ as }"'.`)
-            elseif not found and not b.String.Cofinite then
-                return subtypeFailure(`Unexpected '"{ as }"', expected singleton like '"{ b.String.Singletons[1] }"'.`)
+    elseif a.strings.cofinite and b.strings.cofinite then
+        for s, _ in b.strings.singletons do
+            if not a.strings.singletons[s] then
+                return subtypeFailure(surpressed, `Missing negation \`"{ s }"\``)
+            end
+        end
+    elseif not a.strings.cofinite and not b.strings.cofinite then
+        for s, _ in a.strings.singletons do
+            if not b.strings.singletons[s] then
+                return subtypeFailure(surpressed, `Unexpected \`"{ s }"\``)
             end
         end
     end
 
     local requiredChanges = {}
 
-    if a.List and not b.List then
-        return subtypeFailure(`Unexpected list.`)
+    if a.lists and not b.lists then
+        return subtypeFailure(surpressed, `Unexpected list.`)
     -- `list </: { T }
-    elseif a.List and not a.List.Items and b.List and b.List.Items then
-        return subtypeFailure(`'list' top type is not a subtype of any '\{ T }' type.`)
-    elseif a.List and a.List.Items and b.List and b.List.Items then
+    elseif a.lists and not a.lists.items and b.lists and b.lists.items then
+        return subtypeFailure(surpressed, `'list' top type is not a subtype of any '\{ T }' type.`)
+    elseif a.lists and a.lists.items and b.lists and b.lists.items then
         -- Check invariantly.
         -- `T <: U && U <: T` is equivalent to `T == U`.
-        local first = isSubtypeOf(a.List.Items, b.List.Items)
+        local aItems = a.lists.items
+        local bItems = b.lists.items
 
-        if not first.Holds then
-            first.Variance = "Invariant"
-            return first
-        end
+        local result = isExactly(aItems, bItems)
 
-        table.move(first.RequiredBoundsChanges, 1, #first.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
-        local second = isSupertypeOf(a.List.Items, b.List.Items)
-
-        if not second.Holds then
-            second.Variance = "Invariant"
-            return second
-        end
-
-        table.move(second.RequiredBoundsChanges, 1, #second.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
-    end
-
-    if a.Function and not b.Function then
-        return subtypeFailure("Unexpected function.")
-    -- `function </: ((A) -> B) & ((C) -> D) & ...`
-    elseif a.Function and b.Function then
-        local result = isFunctionSubtypeOf(a.Function, b.Function)
-
-        if result.Holds then
-            table.move(result.RequiredBoundsChanges, 1, #result.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
-        else
+        if not result.holds then
             return result
         end
+
+        requiredChanges = result.requiredBoundsChanges
     end
 
-    if a.Generic then
-        if b.Generic then
-            for gen, inter in a.Generic do
-                local bi = b.Generic[gen]
-                if bi then
-                    local result = isSubtypeOf(inter, bi)
+    if a.functions and not b.functions then
+        return subtypeFailure(surpressed, "Unexpected function.")
+    -- `function </: ((A) -> B) & ((C) -> D) & ...`
+    elseif a.functions and b.functions then
+        local result = isFunctionSubtypeOf(a.functions, b.functions)
 
-                    if result.Holds then
-                        table.move(result.RequiredBoundsChanges, 1, #result.RequiredBoundsChanges, #requiredChanges + 1, requiredChanges)
-                    else
-                        return subtypeFailure(`Generic intersection '{ normalizationToString(inter) }' is not a subtype of '{ normalizationToString(bi) }'.`)
-                    end
-                else
-                    return subtypeFailure(`Unexpected '{ typeToString(gen) }'.`)
-                end
-            end
+        if result.holds then
+            table.move(result.requiredBoundsChanges, 1, #result.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
         else
-            return subtypeFailure(`Not generic.`)
+            return subtypeFailure(surpressed, result.failedPath)
         end
     end
 
-    if a.Pending then
-        if b.Pending then
-            for _, pending in a.Pending do
-                if not table.find(b.Pending, pending) then
-                    return subtypeFailure(`Unexpected '{ typeToString(pending) }'`)
+    if a.pending then
+        for ty, upperBound in a.pending do
+            if not b.pending or not b.pending[ty] then
+                local upperBoundResult = isSubtypeOf(upperBound, b)
+
+                if not upperBoundResult.holds then
+                    return subtypeFailure(surpressed, `Unexpected \`{ typeToString(ty) }\ & { normalizationToString(upperBound) }.`)
                 end
             end
-        else
-            return subtypeFailure(`Not pending.`)
         end
     end
 
     return subtypeSuccess(requiredChanges)
 end
 
-function isSupertypeOf(a: NormalizedType, b: NormalizedType)
+function isSupertypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
     local result = isSubtypeOf(b, a)
-    result.Variance = "Contravariant"
+    -- result.Variance = "Contravariant"
 
     return result
+end
+
+function isExactly(a: NormalizedType, b: NormalizedType): SubtypingResult
+    local r1 = isSubtypeOf(a, b)
+
+    if not r1.holds then
+        return r1
+    end
+
+    local r2 = isSubtypeOf(b, a)
+
+    if not r2.holds then
+        return r2
+    end
+
+    local boundsChanges = {}
+    table.move(r1.requiredBoundsChanges, 1, #r1.requiredBoundsChanges, 1, boundsChanges)
+    table.move(r2.requiredBoundsChanges, 1, #r2.requiredBoundsChanges, #boundsChanges + 1, boundsChanges)
+
+    return {
+        holds = true,
+        errorSurpressing = r1.errorSurpressed or r2.errorSurpressed,
+        requiredBoundsChanges = boundsChanges,
+    }
 end
 
 local genericTypeNameCount = 0
@@ -1316,22 +1303,24 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
     opts.Seen = opts.Seen or {}
 
     if opts.CurrentlyRecursing ~= ty then
-        if opts.Recursive and opts.Recursive[ty] then
-            return opts.Recursive[ty]
+        local rec = opts.Recursive and opts.Recursive[ty]
+        if rec then
+            return rec
         end
 
+        assert(opts.Seen)
         if opts.Seen[ty] then
             toStringRecursiveTypeCount += 1
 
             local name = ty.AliasName or `t{ toStringRecursiveTypeCount }`
             opts.Recursive = opts.Recursive or {}
-            opts.Recursive[ty] = name
+            assert(opts.Recursive)[ty] = name
 
             return name
         end
     end
 
-    opts.Seen[ty] = true
+    assert(opts.Seen)[ty] = true
 
     if (ty :: Type).AliasName and ty.AliasName ~= opts.Alias and ty.Kind ~= "PendingExpansion" then
         return ty.AliasName
@@ -1542,78 +1531,76 @@ end
 function normalizationToType(n: NormalizedType): Type
     local t: { Type } = {}
 
-    if n.Error then
+    if n.errors then
         table.insert(t, errorType())
     end
 
     if isUnknown(n) then
         table.insert(t, unknownType())
     else
-        if n.Nil then
+        if n.nils then
             table.insert(t, primitiveType("nil"))
         end
 
-        if n.Boolean then
-            if n.Boolean.Value ~= nil then
-                table.insert(t, singletonType(n.Boolean.Value))
-            else
-                table.insert(t, primitiveType("boolean"))
-            end
+        if n.booleans.hasTrue and n.booleans.hasFalse then
+            table.insert(t, primitiveType("boolean"))
+        elseif n.booleans.hasTrue then
+            table.insert(t, singletonType(true))
+        elseif n.booleans.hasFalse then
+            table.insert(t, singletonType(false))
         end
 
-        if n.Number then
+        if n.numbers then
             table.insert(t, primitiveType("number"))
         end
 
-        if n.String then
-            if n.String.Singletons then
-                local strs = {}
+        if isStringTop(n.strings) then
+            table.insert(t, primitiveType("string"))
+        elseif not isStringNever(n.strings) then
+            local strs = {}
 
-                for _, s in n.String.Singletons do
-                    local sty = singletonType(s)
+            for _, s in n.strings.singletons do
+                local sty = singletonType(s)
 
-                    if n.String.Cofinite then
-                        table.insert(strs, makeType{ Kind = "Negation", Negated = sty })
-                    else
-                        table.insert(strs, sty)
-                    end
-                end
-
-                if n.String.Cofinite then
-                    table.insert(strs, 1, primitiveType("string"))
-                    table.insert(t, intersectionType(strs))
+                if n.strings.cofinite then
+                    table.insert(strs, makeType{ Kind = "Negation", Negated = sty })
                 else
-                    if #strs == 1 then
-                        table.insert(t, strs[1])
-                    else
-                        table.insert(t, unionType(strs))
-                    end
+                    table.insert(strs, sty)
                 end
+            end
+
+            if n.strings.cofinite then
+                table.insert(strs, 1, primitiveType("string"))
+                table.insert(t, intersectionType(strs))
             else
-                table.insert(t, primitiveType("string"))
+                if #strs == 1 then
+                    table.insert(t, strs[1])
+                else
+                    table.insert(t, unionType(strs))
+                end
             end
         end
 
-        if n.List then
-            if n.List.Items then
-                table.insert(t, listType(normalizationToType(n.List.Items)))
+        if n.lists then
+            if n.lists.items then
+                table.insert(t, listType(normalizationToType(n.lists.items)))
             else
                 table.insert(t, primitiveType("list"))
             end
         end
 
-        if n.Function then
-            if n.Function.Components then
-                local cs = table.create<<Type>>(#n.Function.Components)
+        if n.functions then
+            if n.functions.components then
+                local cs = table.create<<Type>>(#n.functions.components)
 
-                for i, f in n.Function.Components do
-                    local params = table.create<<Type>>(#f.Parameters)
+                for i, f in n.functions.components do
+                    local params = table.create<<Type>>(#f.parameters)
 
-                    for i, param in f.Parameters do
+                    for i, param in f.parameters do
                         params[i] = normalizationToType(param)
                     end
 
-                    cs[i] = functionType(f.Generics, params, normalizationToType(f.Variadic), if f.Return then normalizationToType(f.Return) else nil)
+                    cs[i] = functionType(f.generics, params, normalizationToType(f.variadic), if f.returns then normalizationToType(f.returns) else nil)
                 end
 
                 if #cs == 1 then
@@ -1626,48 +1613,22 @@ function normalizationToType(n: NormalizedType): Type
             end
         end
 
-        if n.Generic then
-            local gens = {}
+        if n.pending then
+            local pends = {}
 
-            for gen, inter in n.Generic do
+            for ty, inter in n.pending do
                 if isUnknown(inter) then
-                    table.insert(gens, gen)
+                    table.insert(pends, ty)
                 else
-                    table.insert(gens, makeIntersection(gen, normalizationToType(inter)))
+                    table.insert(pends, intersectionType({ ty, normalizationToType(inter) }))
                 end
             end
 
-            assert(#gens > 0)
-
-            if #gens == 1 then
-                table.insert(t, gens[1])
+            if #pends == 1 then
+                table.insert(t, pends[1])
             else
-                table.insert(t, unionType(gens))
+                table.insert(t, unionType(pends))
             end
-        end
-
-        if n.Free then
-            local frees = {}
-
-            for free, inter in n.Free do
-                if isUnknown(inter) then
-                    table.insert(frees, free)
-                else
-                    table.insert(frees, makeIntersection(free, normalizationToType(inter)))
-                end
-            end
-
-            assert(#frees > 0)
-
-            if #frees == 1 then
-                table.insert(t, frees[1])
-            else
-                table.insert(t, unionType(frees))
-            end
-        end
-
-        if n.Pending then
-            table.move(n.Pending, 1, #n.Pending, #t + 1, t)
         end
     end
 
@@ -1678,6 +1639,21 @@ function normalizationToType(n: NormalizedType): Type
     end
 
     return unionType(t)
+end
+
+function normalizedFunctionComponentToFunctionType(nfc: NormalizedFunctionComponentType): Type
+    local parameters = table.create<<Type>>(#nfc.parameters)
+
+    for i, param in nfc.parameters do
+        parameters[i] = normalizationToType(param)
+    end
+
+    return functionType(
+        nfc.generics,
+        parameters,
+        normalizationToType(nfc.variadic),
+        if nfc.returns then normalizationToType(nfc.returns) else nil
+    )
 end
 
 function normalizationToString(n: NormalizedType): string
@@ -1720,10 +1696,10 @@ local function subtypingRelation(sub: Type, super: Type): { Type }
     log(`Relation: '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
 
     sub, super = reduceTypeFunctions(sub), reduceTypeFunctions(super)
-    local result = isSubtypeOf(normalize(sub), normalize(super))
+    local result = isSubtypeOf(normalize(sub), normalize(assert(super))) -- TODO luau assert
 
-    if result.Holds then
-        return applyBoundsChanges(result.RequiredBoundsChanges)
+    if result.holds then
+        return applyBoundsChanges(result.requiredBoundsChanges)
     else
         return {}
     end
@@ -1844,6 +1820,8 @@ type GatherFreeTypeSubstitutionsState = {
 }
 
 local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsState, ty: Type, name: string)
+    assert(state.Seen)
+
     if state.Seen[ty] then
         return
     end
@@ -1874,7 +1852,7 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
                         -- TODO add explanatory snippet for this branch...
                         log(`{ typeToString(ty, { HideFreeTypeBounds = true }) } upper bound '{ typeToString(ty.UpperBound) }' will be clipped for intersection with '{ typeToString(previous) }'`)
 
-                        intersectNormalizedType(normUpper, normalize(previous))
+                        intersect(normUpper, normalize(previous))
                         replacement = normalizationToType(normUpper)
                     end
                 else
@@ -1982,7 +1960,7 @@ end
 
 local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsState, ty: Type, name: string)
     state.Seen = state.Seen or {}
-    table.clear(state.Seen)
+    table.clear(assert(state.Seen))
 
     gatherFreeTypeSubstitutions_(state, ty, name)
 end
@@ -2484,18 +2462,18 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
 
-        if not normFn.Function or not isSubtypeOf(normFn, normalize(primitiveType("function"))).Holds then
+        if not normFn.functions or not isSubtypeOf(normFn, normalize(primitiveType("function"))).holds then
             return errorReport(`'{ normalizationToString(normFn) }' is not callable.`, expr.Position)
         end
 
-        assert(normFn.Function)
+        assert(normFn.functions)
 
-        if not normFn.Function.Components then
+        if not normFn.functions.components then
             return errorReport(`The top 'function' type is not safe to call.`, expr.Position)
         end
 
-        if #normFn.Function.Components == 1 then
-            local retTy = normFn.Function.Components[1].Return
+        if #normFn.functions.components == 1 then
+            local retTy = normFn.functions.components[1].returns
             return if retTy then normalizationToType(retTy) else nil
         end
 
@@ -2509,7 +2487,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             normArgs[i] = normalize(a)
         end
 
-        local normReturn = intersectApplicableReturns(normFn.Function.Components, normArgs[1])
+        local normReturn = intersectApplicableReturns(normFn.functions.components, normArgs[1])
 
         if not normReturn then
             local argStrings = table.create<<string>>(#arguments)
@@ -2734,7 +2712,7 @@ local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: Normaliz
         err ..= ` (aka '{ nbs }')`
     end
 
-    err ..= `. { result.FailedPath }`
+    err ..= `. { result.failedPath }`
 
     print(err)
 end
@@ -2798,7 +2776,7 @@ local function issubtypeof_TypeFunction(arguments: { read Type }): ReductionResu
     local na = normalize(a)
     local nb = normalize(b)
 
-    return ok(singletonType(isSubtypeOf(na, nb).Holds))
+    return ok(singletonType(isSubtypeOf(na, nb).holds))
 end
 
 local function items_TypeFunction(arguments: { read Type }): ReductionResult
@@ -2808,12 +2786,12 @@ local function items_TypeFunction(arguments: { read Type }): ReductionResult
 
     local norm = normalize(arguments[1])
 
-    if not isSubtypeOf(norm, normalize(primitiveType("list"))).Holds then
+    if not isSubtypeOf(norm, normalize(primitiveType("list"))).holds then
         return fail(`Expected list type, got '{ typeToString(arguments[1]) }'.`)
     end
 
-    if norm.List and norm.List.Items then
-        return ok(normalizationToType(norm.List.Items))
+    if norm.lists and norm.lists.items then
+        return ok(normalizationToType(norm.lists.items))
     else
         return ok(neverType())
     end
@@ -2968,7 +2946,7 @@ function check(inferred: Type, annotation: Type, position: caw.Position, printNo
 
     local subtypeResult = isSubtypeOf(normalizedInference, normalizedAnnotation)
 
-    if not subtypeResult.Holds then
+    if not subtypeResult.holds then
         reportMismatch(inferred, normalizedInference, annotation, normalizedAnnotation, position, subtypeResult)
     elseif printNote then
         print(`'{ typeToString(inferred) }' is a subtype of '{ typeToString(annotation) }'.`)

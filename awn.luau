@@ -104,47 +104,39 @@ type TypeData =
 type Type = { AliasName: string? } & TypeData
 
 type NormalizedFunctionComponentType = {
-    Generics: { Type },
-    Parameters: { NormalizedType },
-    Variadic: NormalizedType,
-    Return: NormalizedType?,
+    read generics: { read Type },
+    read parameters: { read NormalizedType },
+    read variadic: NormalizedType,
+    read returns: NormalizedType?,
 }
 
 type NormalizedFunctionType = {
     -- `nil` = top 'function' type.
-    Components: { NormalizedFunctionComponentType }?
+    read components: { read NormalizedFunctionComponentType }?
 }
 
 type NormalizedType = {
-    Error:   boolean,
-    Nil:     boolean,
+    read errors:   boolean,
+    read nils:     boolean,
     -- `nil` = not present.
-    Boolean: {
-        -- `nil` = top `boolean`, otherwise singleton.
-        Value: boolean?,
-    }?,
-    Number:  boolean,
+    read booleans: nil | "true" | "false" | "top",
+    read numbers:  boolean,
     -- `nil` = not present.
-    String:  {
+    read strings:  {
         -- If this is `nil`, we're the top 'string'.
-        Singletons: { string }?,
-        -- Whether we're a union of negated singletons.
+        read singletons: { read string }?,
+        -- Whether we're an intersection of negated singletons.
         -- (took this term directly from Luau :)
-        Cofinite: boolean,
+        read cofinite: boolean,
     }?,
-    -- If `Items` is not present, we're the top.
-    List: { Items: NormalizedType? }?,
+    -- If `items` is not present, we're the top.
+    read lists: { read items: NormalizedType? }?,
     -- `nil` = not present.
-    Function: NormalizedFunctionType?,
-    -- Union of generic types. Key is the generic type, value is what it intersects with (`unknown` normally).
-    Generic: { [Type]: NormalizedType }?,
-    -- Union of free types.  Key is the free type, value is what it intersects with (`unknown` normally).
-    Free: { [Type]: NormalizedType }?,
-    -- Union of Pending Expansion types.
-    Pending: { Type }?,
+    read functions: NormalizedFunctionType?,
+    -- Union of generic/free/pending expansion types. Key is the type, value is what it is being intersected with
+    -- (by default, `unknown`.)
+    read pending: { read [Type]: NormalizedType? }?,
 }
-
-type ReadOnlyNormalizedType = typeof(table.freeze({} :: NormalizedType))
 
 local typeToString
 
@@ -311,69 +303,42 @@ end
 
 local function normalizedNever(): NormalizedType
     return {
-        Error = false,
-        Nil = false,
-        Boolean = nil,
-        Number = false,
-        String = nil,
-        Function = nil,
+        errors = false,
+        nils = false,
+        booleans = nil,
+        numbers = false,
+        strings = nil,
+        functions = nil,
     }
 end
 
 local function normalizedUnknown(): NormalizedType
     return {
-        Error = false,
-        Nil = true,
-        Boolean = {},
-        Number = true,
-        String = { Cofinite = false },
-        List = {},
-        Function = {},
+        errors = false,
+        nils = true,
+        booleans = "top",
+        numbers = true,
+        strings = { cofinite = false },
+        lists = {},
+        functions = {},
     }
 end
 
-local function toNever(n: NormalizedType)
-    n.Error = false
-    n.Nil = false
-    n.Boolean = nil
-    n.Number = false
-    n.String = nil
-    n.List = nil
-    n.Function = nil
-    n.Generic = nil
-    n.Free = nil
-    n.Pending = nil
-end
-
-local function toUnknown(n: NormalizedType)
-    n.Error = false
-    n.Nil = true
-    n.Boolean = {}
-    n.Number = true
-    n.String = { Cofinite = false }
-    n.List = {}
-    n.Function = {}
-    n.Generic = nil
-    n.Free = nil
-    n.Pending = nil
-end
-
 local function isNever(n: NormalizedType)
-    return not n.Nil and not n.Boolean
-        and not n.Number and not n.String and not n.List
-        and not n.Function and not n.Generic and not n.Free
-        and not n.Pending
+    return not n.nils and not n.booleans
+        and not n.numbers and not n.strings and not n.lists
+        and not n.functions and not n.pending
 end
 
 local function isUnknown(n: NormalizedType)
     -- Check for all tops.
     return not not (
-        n.Nil
-        and (n.Boolean and n.Boolean.Value == nil)
-        and n.Number
-        and (n.String and not n.String.Cofinite and not n.String.Singletons)
-        and (n.List and not n.List.Items)
-        and (n.Function and not n.Function.Components)
+        n.nils
+        and (n.booleans == "top")
+        and n.numbers
+        and (n.strings and not n.strings.cofinite and not n.strings.singletons)
+        and (n.lists and not n.lists.items)
+        and (n.functions and not n.functions.components)
     )
 end
 
@@ -395,114 +360,143 @@ end
 
 local isSubtypeOf
 
-local function unionNormalizedType(n: NormalizedType, with: NormalizedType)
-    n.Error = n.Error or with.Error
-    n.Nil = n.Nil or with.Nil
-    n.Number = n.Number or with.Number
+local function unionNormalizedType(a: NormalizedType, b: NormalizedType): NormalizedType
+    local errors = a.errors or b.errors
+    local nils = a.nils or b.nils
+    local numbers = a.numbers or b.numbers
 
-    if n.Boolean and with.Boolean then
-        local myBoolean = n.Boolean.Value
-        local withBoolean = with.Boolean.Value
+    local booleans =
+        -- `T | T` => `T`
+        if a.booleans == b.booleans then a.booleans
+        -- `boolean | (T <: boolean)` and `(T <: boolean) | boolean` => `boolean`
+        else if a.booleans == "top" or b.booleans == "top" then "top"
+        -- `boolean | never` => `boolean`
+        else if a.booleans and not b.booleans then a.booleans
+        -- `never | boolean` => `boolean`
+        else if b.booleans and not a.booleans then b.booleans
+        -- `false | true` and `true | false` => `boolean`
+        else "top"
 
-        -- `true/false | boolean` => `boolean`
-        if myBoolean ~= nil and withBoolean == nil then
-            n.Boolean.Value = nil -- Become top `boolean`.
-        elseif (myBoolean == false and withBoolean == true)
-            or (myBoolean == true and withBoolean == false)
-        then
-            n.Boolean.Value = nil -- Become top `boolean`.
-        end
-    else
-        n.Boolean = n.Boolean or with.Boolean
-    end
+    local strings = nil
 
-    if n.String and with.String then
-        local mySingles = n.String.Singletons
-        local withSingles = with.String.Singletons
+    if a.strings and b.strings then
+        local aSingles = a.strings.singletons
+        local bSingles = b.strings.singletons
 
-        if mySingles and withSingles then
-            if n.String.Cofinite and not with.String.Cofinite then
-                for i, s in withSingles do
-                    local foundIndex = table.find(mySingles, s)
-                    if foundIndex then
-                        table.remove(mySingles, foundIndex)
+        if aSingles and bSingles then
+            local cofinite = a.strings.cofinite
+            local singles = table.create<<string>>(#aSingles)
+            -- TODO luau cast (readonly indexer)
+            table.move(aSingles :: any, 1, #aSingles, 1, singles)
+
+            if a.strings.cofinite == b.strings.cofinite then
+                for _, b in bSingles do
+                    if not table.find(singles, b) then
+                        table.insert(singles, b)
                     end
                 end
             else
-                table.move(withSingles, 1, #withSingles, #mySingles + 1, mySingles)
-            end
-        elseif mySingles and not withSingles then
-            n.String = { Cofinite = false } -- Union singletons with top `string`.
-        end
-    else
-        n.String = n.String or with.String
-    end
+                -- Remove negated singletons.
+                for _, b in bSingles do
+                    local i = table.find(singles, b)
 
-    if not n.List and with.List then
-        n.List = with.List
-    elseif n.List and n.List.Items and with.List and not with.List.Items then
-        -- Reset to top.
-        n.List = {}
-    elseif n.List and n.List.Items and with.List and with.List.Items then
-        if not isSubtypeOf(n.List.Items, with.List.Items).Holds or not isSubtypeOf(with.List.Items, n.List.Items).Holds then
-            -- Reading from it would be a union, writing to it would be an intersection, this is not representable currently.
-            n.List.Items = normalizedNever()
-        end
-    end
-
-    if not n.Function and with.Function then
-        n.Function = table.clone(with.Function)
-    elseif n.Function and with.Function and n.Function.Components and with.Function.Components then
-        table.move(with.Function.Components, 1, #with.Function.Components, #n.Function.Components + 1, n.Function.Components)
-    elseif n.Function and n.Function.Components and with.Function and not with.Function.Components then
-        -- Reset to top.
-        n.Function = {}
-    end
-
-    if with.Generic then
-        local gens = n.Generic or {}
-
-        for gen, intersect in with.Generic do
-            intersect = deepCopy(intersect)
-            if gens[gen] then
-                unionNormalizedType(gens[gen], intersect)
-            else
-                gens[gen] = intersect
-            end
-        end
-
-        n.Generic = gens
-    end
-
-    if with.Free then
-        local frees = n.Free or {}
-
-        for free, intersect in with.Free do
-            intersect = deepCopy(intersect)
-            if frees[free] then
-                unionNormalizedType(frees[free], intersect)
-            else
-                frees[free] = intersect
-            end
-        end
-
-        n.Free = frees
-    end
-
-    if with.Pending then
-        if n.Pending then
-            for _, pending in with.Pending do
-                if not table.find(n.Pending, pending) then
-                    table.insert(n.Pending, pending)
+                    if i then
+                        table.remove(singles, i)
+                    end
                 end
             end
+
+            strings = { cofinite = cofinite, singletons = singles }
         else
-            n.Pending = table.clone(with.Pending)
+            -- `"a" | string` and `string | "a"` => `string`
+            -- `(string & ~"a") | string` and `string | (string & | "a")` => `string`
+            strings = { cofinite = false }
         end
+    else
+        -- One is `never`.
+        strings = a.strings or b.strings
     end
+
+    local lists = nil
+
+    if a.lists and b.lists then
+        if a.lists.items and b.lists.items then
+            local r1 = isSubtypeOf(a.lists.items, b.lists.items)
+            local r2 = isSubtypeOf(b.lists.items, a.lists.items)
+
+            if r1.Holds and r2.Holds then
+                lists = { items = a.lists.items }
+            else
+                -- Reading from it would be a union, writing to it would be an intersection.
+                -- This is not representible currently.
+                lists = { items = normalizedNever() }
+            end
+        else
+            -- Top.
+            lists = {}
+        end
+    else
+        -- One is `never`.
+        lists = a.lists or b.lists
+    end
+
+    local functions = nil
+
+    if a.functions and b.functions then
+        if a.functions.components and b.functions.components then
+            -- TODO.
+            print(`Cannot union discrete function types.`)
+            functions = {}
+            errors = true
+        else
+            -- Top.
+            functions = {}
+        end
+    else
+        -- One is `never`.
+        functions = a.functions or b.functions
+    end
+
+    local pending = nil
+
+    if a.pending and b.pending then
+        local nowPending: { [Type]: NormalizedType } = {}
+
+        for ty, intersect in a.pending do
+            local otherIntersect = b.pending[ty]
+
+            if otherIntersect then
+                -- `(T & string) | (T & nil)`
+                -- ... sub `T = string?` ...
+                -- `(string? & string) | (string? & nil)`
+                -- a.k.a. `(string) | (nil)` a.k.a. `string?`
+                -- a.k.a. `string? & string?`
+
+                -- Union the intersectors.
+                nowPending[ty] = unionNormalizedType(intersect, otherIntersect)
+            else
+                nowPending[ty] = intersect
+            end
+        end
+
+        pending = nowPending
+    else
+        pending = a.pending or b.pending
+    end
+
+    return {
+        errors = errors,
+        nils = nils,
+        booleans = booleans,
+        numbers = numbers,
+        strings = strings,
+        lists = lists,
+        functions = functions,
+        pending = pending,
+    }
 end
 
-local function intersectNormalizedType(a: ReadOnlyNormalizedType, b: ReadOnlyNormalizedType): NormalizedType
+local function intersectNormalizedType(a: NormalizedType, b: NormalizedType): NormalizedType
     local n = normalizedNever()
 
     n.Error = a.Error or b.Error

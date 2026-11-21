@@ -2005,6 +2005,7 @@ type InferenceState = {
     ReturnType: nil | Type | boolean,
 }
 
+-- TODO: This is needed in `isFunctionSubtypeOf` and should not be using `subtypingRelation` as that modifies types.
 function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type }, { [Type]: Type })
     local gensToSubstitute = {}
     local ftyToGeneric = {}

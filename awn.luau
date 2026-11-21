@@ -438,7 +438,8 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
         local aSingles = aStrings.singletons
         local bSingles = bStrings.singletons
 
-        if aSingles and bSingles then
+        -- TODO luau cast.
+        if next(aSingles :: any) ~= nil and next(bSingles :: any) ~= nil then
             local singles: { [string]: true } = {}
 
             -- TODO check
@@ -464,6 +465,18 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
                 else
                     singles[s] = true
                 end
+            end
+
+            strings = { cofinite = false, singletons = singles }
+        elseif not aStrings.cofinite and not bStrings.cofinite then
+            local singles: { [string]: true } = {}
+
+            for s, _ in bSingles do
+                singles[s] = true
+            end
+
+            for s, _ in bSingles do
+                singles[s] = true
             end
 
             strings = { cofinite = false, singletons = singles }
@@ -576,7 +589,11 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
         local aSingles = aStrings.singletons
         local bSingles = bStrings.singletons
 
-        if aSingles and bSingles then
+        local aHasSingles = next(aSingles :: any) ~= nil
+        local bHasSingles = next(bSingles :: any) ~= nil
+
+        -- TODO luau cast.
+        if aHasSingles and bHasSingles then
             local singles: { [string]: true } = {}
 
             if aStrings.cofinite == bStrings.cofinite then
@@ -597,8 +614,8 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
                 strings = { cofinite = aStrings.cofinite, singletons = singles }
             end
         else
-            strings = if aSingles then aStrings
-                        else if bSingles then bStrings
+            strings = if aHasSingles then aStrings
+                        else if bHasSingles then bStrings
                         else { cofinite = true, singletons = {} }
         end
     end
@@ -788,6 +805,8 @@ local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
             n = union(n, normalize_(component, seen))
         end
     elseif ty.Kind == "Intersection" then
+        n = normalizedUnknown()
+
         for _, component in ty.Components do
             n = intersect(n, normalize_(component, seen))
         end
@@ -2685,7 +2704,7 @@ end
 
 function typeAnnotationToType(position, annotation)
     local ty = typeAnnotationToType_(position, annotation)
-    reduceTypeFunctions(ty)
+    -- reduceTypeFunctions(ty)
 
     return ty
 end
@@ -2808,6 +2827,15 @@ local function items_TypeFunction(arguments: { read Type }): ReductionResult
     end
 end
 
+local function normalize_TypeFunction(arguments: { read Type }): ReductionResult
+    if #arguments ~= 1 then
+        return fail(`Expected exactly 1 type argument, got { #arguments } instead.`)
+    end
+
+    local norm = normalize(arguments[1])
+    return ok(normalizationToType(norm))
+end
+
 local typeFunctions: { [string]: TypeFunction? } = {
     issubtypeof = {
         canReduceGenerics = false,
@@ -2816,6 +2844,10 @@ local typeFunctions: { [string]: TypeFunction? } = {
     items = {
         canReduceGenerics = false,
         tryReduce = items_TypeFunction,
+    },
+    normalize = {
+        canReduceGenerics = false,
+        tryReduce = normalize_TypeFunction,
     },
 }
 
@@ -2986,7 +3018,7 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     for _, k in typeAssociationsOrdered do
         local t = typeAssociations[k]
         if t then
-            print(`{ k }: { typeToString(reduceTypeFunctions(t.Type)) }`)
+            print(`{ k }: { t.Type.AliasName or typeToString(reduceTypeFunctions(t.Type)) }`)
         end
     end
 

@@ -656,6 +656,11 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
         local parens, consumeParens = peekNextToken(state)
 
         while parens.Type ~= ")" do
+            if parens.Type == "EndOfFile" or parens.Type == "=" then
+                state.Report(`Expected ')', got '{ tokenToString(parens) }' instead.`, parens)
+                return { Kind = "Error" }
+            end
+
             table.insert(params, parseTypeAnnotation(state))
             parens, consumeParens = peekNextToken(state)
 

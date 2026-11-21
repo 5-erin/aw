@@ -1332,7 +1332,7 @@ local toStringRecursiveTypeCount = 0
 local function typeToString_(ty: Type, opts: ToStringOptions): string
     opts.Seen = opts.Seen or {}
 
-    if opts.CurrentlyRecursing ~= ty then
+    if opts.CurrentlyRecursing ~= ty and ty.Kind ~= "Generic" then
         local rec = opts.Recursive and opts.Recursive[ty]
         if rec then
             return rec
@@ -1352,7 +1352,7 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
 
     assert(opts.Seen)[ty] = true
 
-    if (ty :: Type).AliasName and ty.AliasName ~= opts.Alias and ty.Kind ~= "PendingExpansion" then
+    if ty.AliasName and ty.AliasName ~= opts.Alias and ty.Kind ~= "PendingExpansion" then
         return ty.AliasName
     end
 
@@ -1756,6 +1756,11 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
     if traversed[ty] then
         return ty
     end
+
+    if substitutions[ty] then
+        return substituteAllIn(substitutions[ty], substitutions, traversed)
+    end
+
     traversed[ty] = true
 
     if ty.Kind == "error" or ty.Kind == "never" or ty.Kind == "unknown"
@@ -1768,10 +1773,6 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
     elseif ty.Kind == "Generic" then
         return if substitutions[ty] then substituteAllIn(substitutions[ty], substitutions, traversed) else ty
     elseif ty.Kind == "Free" then
-        if substitutions[ty] then
-            return substituteAllIn(substitutions[ty], substitutions, traversed)
-        end
-
         if ty.LowerBound.Kind ~= "never" and ty.UpperBound.Kind == "unknown" then
             return substituteAllIn(ty.LowerBound, substitutions, traversed)
         elseif ty.UpperBound.Kind ~= "unknown" then

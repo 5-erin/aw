@@ -14,40 +14,30 @@ type ErrorType = {
     read Kind: "error",
 }
 
-type NeverType = {
-    read Kind: "never",
-}
-
 type UnknownType = {
     read Kind: "unknown",
 }
 
-type PrimitiveType = {
-    read Kind: "Primitive",
-    read Primitive: "nil" | "boolean" | "number" | "string" | "list" | "function"
+type NeverType = {
+    read Kind: "never",
 }
 
-type ListType = {
-    read Kind: "List",
-    read Items: Type,
-}
+-- "Unknown"  = Not yet determined.
+-- "Negative" = Appears in contravariant positions only, take upper bound when eliminating.
+-- "Positive" = Appears in covariant positions only, take lower bound when eliminating.
+-- "Mixed"    = Appears in both kinds of positions, generalize.
+type Polarity = "Unknown" | "Negative" | "Positive" | "Mixed"
 
-type SingletonType = {
-    read Kind: "Singleton",
-    read Value: string | boolean,
+type FreeType = {
+    read Kind: "Free",
+    Name: string?,
+    UpperBound: Type,
+    LowerBound: Type,
 }
 
 type GenericType = {
     read Kind: "Generic",
     Name: string?,
-}
-
-type FunctionType = {
-    read Kind: "Function",
-    read Generics: { read Type },
-    read Parameters: { read Type },
-    read Variadic: Type,
-    read Returns: Type?,
 }
 
 -- Types of the form `T<U>`, where they may have generics that need to be substituted,
@@ -56,6 +46,29 @@ type PendingExpansionType = {
     read Kind: "PendingExpansion",
     read Name: string,
     read Arguments: { read Type },
+}
+
+type PrimitiveType = {
+    read Kind: "Primitive",
+    read Primitive: "nil" | "boolean" | "number" | "string" | "list" | "function"
+}
+
+type SingletonType = {
+    read Kind: "Singleton",
+    read Value: string | boolean,
+}
+
+type ListType = {
+    read Kind: "List",
+    read Items: Type,
+}
+
+type FunctionType = {
+    read Kind: "Function",
+    read Generics: { read Type },
+    read Parameters: { read Type },
+    read Variadic: Type,
+    read Returns: Type?,
 }
 
 type NegationType = {
@@ -71,19 +84,6 @@ type UnionType = {
 type IntersectionType = {
     read Kind: "Intersection",
     read Components: { read Type },
-}
-
--- "Unknown"  = Not yet determined.
--- "Negative" = Appears in contravariant positions only, take upper bound when eliminating.
--- "Positive" = Appears in covariant positions only, take lower bound when eliminating.
--- "Mixed"    = Appears in both kinds of positions, generalize.
-type Polarity = "Unknown" | "Negative" | "Positive" | "Mixed"
-
-type FreeType = {
-    read Kind: "Free",
-    Name: string?,
-    UpperBound: Type,
-    LowerBound: Type,
 }
 
 type TypeData =
@@ -387,7 +387,39 @@ end
 local isSubtypeOf
 local isFunctionSubtypeOf
 
-local function unionNormalizedType(a: NormalizedType, b: NormalizedType): NormalizedType
+local function negate(n: NormalizedType): NormalizedType
+    local errors = n.errors
+
+    if n.lists and n.lists.items then
+        print(`Cannot negate discrete list types.`)
+        errors = true
+    end
+
+    if n.functions and n.functions.components then
+        print(`Cannot negate discrete function types.`)
+        errors = true
+    end
+
+    -- TODO luau cast.
+    if next(n.pending :: any) ~= nil then
+        print(`Cannot negate pending types (generics, type functions, or free types.)`)
+        errors = true
+    end
+
+    local strings = { cofinite = not n.strings.cofinite, singletons = n.strings.singletons }
+
+    return {
+        errors = errors,
+        nils = not n.nils,
+        booleans = { hasTrue = not n.booleans.hasTrue, hasFalse = not n.booleans.hasFalse },
+        numbers = not n.numbers,
+        strings = strings,
+        lists = if n.lists then nil else {},
+        functions = if n.functions then nil else {},
+    }
+end
+
+local function union(a: NormalizedType, b: NormalizedType): NormalizedType
     local errors = a.errors or b.errors
     local nils = a.nils or b.nils
     local numbers = a.numbers or b.numbers
@@ -492,7 +524,7 @@ local function unionNormalizedType(a: NormalizedType, b: NormalizedType): Normal
                 -- a.k.a. `string? & string?`
 
                 -- Union the intersectors.
-                nowPending[ty] = unionNormalizedType(intersect, otherIntersect)
+                nowPending[ty] = union(intersect, otherIntersect)
             else
                 nowPending[ty] = intersect
             end
@@ -515,7 +547,7 @@ local function unionNormalizedType(a: NormalizedType, b: NormalizedType): Normal
     }
 end
 
-local function intersectNormalizedType(a: NormalizedType, b: NormalizedType): NormalizedType
+local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
     local errors = a.errors or b.errors
     local nils = a.nils and b.nils
     local numbers = a.numbers and b.numbers
@@ -612,8 +644,8 @@ local function intersectNormalizedType(a: NormalizedType, b: NormalizedType): No
     if a.pending then
         pending = {}
 
-        for ty, intersect in a.pending do
-            pending[ty] = intersectNormalizedType(intersect, b)
+        for ty, intersectsWith in a.pending do
+            pending[ty] = intersect(intersectsWith, b)
         end
     end
 
@@ -621,11 +653,11 @@ local function intersectNormalizedType(a: NormalizedType, b: NormalizedType): No
         pending = pending or {}
         assert(pending)
 
-        for ty, intersect in b.pending do
+        for ty, intersectsWith in b.pending do
             if pending[ty] then
-                pending[ty] = intersectNormalizedType(pending[ty], a)
+                pending[ty] = intersect(pending[ty], a)
             else
-                pending[ty] = intersectNormalizedType(intersect, a)
+                pending[ty] = intersect(intersectsWith, a)
             end
         end
     end
@@ -642,50 +674,69 @@ local function intersectNormalizedType(a: NormalizedType, b: NormalizedType): No
     }
 end
 
-local function normalize_(ty: Type, seen: { [Type]: NormalizedType }): NormalizedType
+local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
     if seen[ty] then
-        return seen[ty]
+        return normalize_(errorType(), {})
     end
+    seen[ty] = true
 
-    local n = normalizedNever()
+    local errors = false
+    local nils = false
+    local booleans = { hasTrue = false, hasFalse = false }
+    local numbers = false
+    local strings = { cofinite = false, singletons = {} }
+    local lists = nil
+    local functions = nil
+    local pending: { [Type]: NormalizedType }? = nil
 
     if ty.Kind == "error" then
-        n.Error = true
-    elseif ty.Kind == "never" then
-        -- Default state is `never`.
+        errors = true
     elseif ty.Kind == "unknown" then
-        toUnknown(n)
+        nils = true
+        booleans.hasTrue = true
+        booleans.hasFalse = true
+        numbers = true
+        strings.cofinite = true
+        lists = {}
+        functions = {}
+    elseif ty.Kind == "never" then
+        -- Default state.
+    elseif ty.Kind == "Free" or ty.Kind == "Generic" or ty.Kind == "PendingExpansion" then
+        local nowPending = pending or {}
+
+        nowPending[ty] = normalizedUnknown()
+        pending = nowPending
     elseif ty.Kind == "Primitive" then
         if ty.Primitive == "nil" then
-            n.Nil = true
+            nils = true
         elseif ty.Primitive == "boolean" then
-            n.Boolean = {}
-        elseif ty.Primitive == "number" then
-            n.Number = true
+            booleans.hasTrue = true
+            booleans.hasFalse = true
+        elseif ty.Primitive  == "number" then
+            numbers = true
         elseif ty.Primitive == "string" then
-            n.String = { Cofinite = false }
+            strings.cofinite = true
         elseif ty.Primitive == "list" then
-            n.List = {}
+            lists = {}
         elseif ty.Primitive == "function" then
-            n.Function = {}
+            functions = {}
         else
             unreachable(ty.Primitive)
-            error(`Unreachable.`)
         end
-    elseif ty.Kind == "List" then
-        n.List = { Items = normalize_(ty.Items, seen) }
-
     elseif ty.Kind == "Singleton" then
         if typeof(ty.Value) == "boolean" then
-            n.Boolean = { Value = ty.Value }
+            if ty.Value then
+                booleans.hasTrue = true
+            else
+                booleans.hasFalse = true
+            end
         elseif typeof(ty.Value) == "string" then
-            n.String = { Singletons = { ty.Value }, Cofinite = false }
+                strings.singletons[ty.Value] = true :: true -- TODO luau cast.
         else
-            error(`Unsupported singleton kind '{ typeof(ty.Value) }'.`)
+            error(`Invalid singleton kind '{ typeof(ty.Value) }'.`)
         end
-    elseif ty.Kind == "Generic" then
-        n.Generic = { [ty] = normalizedUnknown() }
-
+    elseif ty.Kind == "List" then
+        lists = { items = normalize_(ty.Items, seen) }
     elseif ty.Kind == "Function" then
         local params = table.create<<NormalizedType>>(#ty.Parameters)
 
@@ -693,86 +744,45 @@ local function normalize_(ty: Type, seen: { [Type]: NormalizedType }): Normalize
             params[i] = normalize_(param, seen)
         end
 
-        n.Function = {
-            Components = {
+        functions = {
+            components = {
                 {
-                    -- TODO luau
-                    Generics = table.clone(ty.Generics :: any),
-                    Parameters = params,
-                    Variadic = normalize_(ty.Variadic, seen),
-                    Return = if ty.Returns then normalize_(ty.Returns, seen) else nil,
+                    generics = ty.Generics,
+                    parameters = params,
+                    variadic = normalize_(ty.Variadic, seen),
+                    returns = if ty.Returns then normalize_(ty.Returns, seen) else nil,
                 },
             }
         }
-
-    elseif ty.Kind == "PendingExpansion" then
-        n.Pending = { ty }
-
-    elseif ty.Kind == "Negation" then
-        n = normalize_(ty.Negated, seen)
-
-        if isUnknown(n) then
-            toNever(n)
-        elseif isNever(n) then
-            toUnknown(n)
-        else
-            n.Nil = not n.Nil
-
-            if n.Boolean then
-                if n.Boolean.Value then
-                    n.Boolean.Value = not n.Boolean.Value
-                else
-                    n.Boolean = nil
-                end
-            else
-                n.Boolean = {}
-            end
-
-            n.Number = not n.Number
-
-            if n.String then
-                if n.String.Singletons then
-                    n.String.Cofinite = not n.String.Cofinite
-                else
-                    n.String = nil
-                end
-            else
-                n.String = { Cofinite = false }
-            end
-
-            if n.Function and n.Function.Components or n.Generic or n.Free then
-                print(`Cannot negate non-top function, generic, or free types.`)
-                n.Error = true
-            end
-
-            n.Function = if n.Function then nil else {}
-            n.List = if n.List then nil else {}
-        end
-
-    elseif ty.Kind == "Union" then
-        -- Unions grow from `never`.
-        toNever(n)
-
-        for i, c in ty.Components do
-            local inner = normalize_(c, seen)
-            unionNormalizedType(n, inner)
-        end
-    elseif ty.Kind == "Intersection" then
-        -- Intersections are carved out from `unknown`.
-        toUnknown(n)
-
-        for i, c in ty.Components do
-            local inner = normalize_(c, seen)
-            intersectNormalizedType(n, inner)
-        end
-    elseif ty.Kind == "Free" then
-        n.Free = { [ty] = normalizedUnknown() }
     else
-        unreachable(ty.Kind)
-        error(`Unreachable.`)
+        if ty.Kind ~= "Negation" and ty.Kind ~= "Union" and ty.Kind ~= "Intersection" then
+            unreachable(ty.Kind)
+        end
     end
 
-    seen[ty] = n
+    local n: NormalizedType = {
+        errors = errors,
+        nils = nils,
+        booleans = booleans,
+        numbers = numbers,
+        strings = strings,
+        lists = lists,
+        functions = functions,
+        pending = pending,
+    }
+
+    if ty.Kind == "Negation" then
+        n = negate(n)
+    elseif ty.Kind == "Union" then
+        for _, component in ty.Components do
+            n = union(n, normalize_(component, seen))
+        end
+    elseif ty.Kind == "Intersection" then
+        for _, component in ty.Components do
+            n = intersect(n, normalize_(component, seen))
+        end
+    end
+
     return n
 end
 

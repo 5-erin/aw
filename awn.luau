@@ -432,7 +432,7 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
 
     local strings = { cofinite = false, singletons = {} }
 
-    if a.strings and b.strings then
+    if not isStringNever(a.strings) and not isStringNever(b.strings) then
         local aStrings = a.strings
         local bStrings = b.strings
         local aSingles = aStrings.singletons
@@ -583,7 +583,7 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
 
     local strings = { cofinite = false, singletons = {} }
 
-    if a.strings and b.strings then
+    if not isStringNever(a.strings) and not isStringNever(b.strings) then
         local aStrings = a.strings
         local bStrings = b.strings
         local aSingles = aStrings.singletons

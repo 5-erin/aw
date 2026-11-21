@@ -103,6 +103,18 @@ type TypeData =
 
 type Type = { AliasName: string? } & TypeData
 
+type NormalizedBooleanType = {
+    read hasTrue: boolean,
+    read hasFalse: boolean
+}
+
+type NormalizedStringType = {
+    -- If `true`, we start from `string` and `singletons` are an intersection of negations with us.
+    -- If `false`, we start from `never` and `singletons` are a union.
+    read cofinite: boolean,
+    read singletons: { read [string]: nil | true },
+}
+
 type NormalizedFunctionComponentType = {
     read generics: { read Type },
     read parameters: { read NormalizedType },
@@ -118,17 +130,9 @@ type NormalizedFunctionType = {
 type NormalizedType = {
     read errors:   boolean,
     read nils:     boolean,
-    -- `nil` = not present.
-    read booleans: nil | "true" | "false" | "top",
+    read booleans: NormalizedBooleanType,
     read numbers:  boolean,
-    -- `nil` = not present.
-    read strings:  {
-        -- If this is `nil`, we're the top 'string'.
-        read singletons: { read string }?,
-        -- Whether we're an intersection of negated singletons.
-        -- (took this term directly from Luau :)
-        read cofinite: boolean,
-    }?,
+    read strings:  NormalizedStringType,
     -- If `items` is not present, we're the top.
     read lists: { read items: NormalizedType? }?,
     -- `nil` = not present.
@@ -305,9 +309,9 @@ local function normalizedNever(): NormalizedType
     return {
         errors = false,
         nils = false,
-        booleans = nil,
+        booleans = { hasTrue = false, hasFalse = false },
         numbers = false,
-        strings = nil,
+        strings = { cofinite = false, singletons = {} },
         functions = nil,
     }
 end
@@ -316,27 +320,49 @@ local function normalizedUnknown(): NormalizedType
     return {
         errors = false,
         nils = true,
-        booleans = "top",
+        booleans = { hasTrue = true, hasFalse = true },
         numbers = true,
-        strings = { cofinite = false },
+        strings = { cofinite = true, singletons = {} },
         lists = {},
         functions = {},
     }
 end
 
+local function isBooleanNever(b: NormalizedBooleanType)
+    return b.hasTrue == false and b.hasFalse == false
+end
+
+local function isBooleanTop(b: NormalizedBooleanType)
+    return b.hasTrue == true and b.hasFalse == true
+end
+
+local function isStringNever(s: NormalizedStringType)
+    -- TODO luau cast.
+    return not s.cofinite and next(s.singletons :: any) == nil
+end
+
+local function isStringTop(s: NormalizedStringType)
+    -- TODO luau cast.
+    return s.cofinite and next(s.singletons :: any) == nil
+end
+
 local function isNever(n: NormalizedType)
-    return not n.nils and not n.booleans
-        and not n.numbers and not n.strings and not n.lists
-        and not n.functions and not n.pending
+    return not n.nils
+        and isBooleanNever(n.booleans)
+        and not n.numbers
+        and isStringNever(n.strings)
+        and not n.lists
+        and not n.functions
+        and not n.pending
 end
 
 local function isUnknown(n: NormalizedType)
     -- Check for all tops.
     return not not (
         n.nils
-        and (n.booleans == "top")
+        and isBooleanTop(n.booleans)
         and n.numbers
-        and (n.strings and not n.strings.cofinite and not n.strings.singletons)
+        and isStringTop(n.strings)
         and (n.lists and not n.lists.items)
         and (n.functions and not n.functions.components)
     )
@@ -359,50 +385,40 @@ local function deepCopy(tab: any): any
 end
 
 local isSubtypeOf
+local isFunctionSubtypeOf
 
 local function unionNormalizedType(a: NormalizedType, b: NormalizedType): NormalizedType
     local errors = a.errors or b.errors
     local nils = a.nils or b.nils
     local numbers = a.numbers or b.numbers
 
-    local booleans =
-        -- `T | T` => `T`
-        if a.booleans == b.booleans then a.booleans
-        -- `boolean | (T <: boolean)` and `(T <: boolean) | boolean` => `boolean`
-        else if a.booleans == "top" or b.booleans == "top" then "top"
-        -- `boolean | never` => `boolean`
-        else if a.booleans and not b.booleans then a.booleans
-        -- `never | boolean` => `boolean`
-        else if b.booleans and not a.booleans then b.booleans
-        -- `false | true` and `true | false` => `boolean`
-        else "top"
+    local booleans = {
+        hasTrue = a.booleans.hasTrue or b.booleans.hasTrue,
+        hasFalse = a.booleans.hasFalse or b.booleans.hasFalse
+    }
 
-    local strings = nil
+    local strings = { cofinite = false, singletons = {} }
 
     if a.strings and b.strings then
-        local aSingles = a.strings.singletons
-        local bSingles = b.strings.singletons
+        local aStrings = a.strings
+        local bStrings = b.strings
+        local aSingles = aStrings.singletons
+        local bSingles = bStrings.singletons
 
         if aSingles and bSingles then
-            local cofinite = a.strings.cofinite
-            local singles = table.create<<string>>(#aSingles)
-            -- TODO luau cast (readonly indexer)
-            table.move(aSingles :: any, 1, #aSingles, 1, singles)
+            local cofinite = aStrings.cofinite
+            local singles: { [string]: true } = {}
 
-            if a.strings.cofinite == b.strings.cofinite then
-                for _, b in bSingles do
-                    if not table.find(singles, b) then
-                        table.insert(singles, b)
+            -- TODO check
+            for s, _ in aSingles do
+                if bSingles[s] then
+                    if bStrings.cofinite == aStrings.cofinite then
+                        if not aStrings.cofinite then
+                            singles[s] = true
+                        end
                     end
-                end
-            else
-                -- Remove negated singletons.
-                for _, b in bSingles do
-                    local i = table.find(singles, b)
-
-                    if i then
-                        table.remove(singles, i)
-                    end
+                else
+                    singles[s] = true
                 end
             end
 
@@ -410,7 +426,7 @@ local function unionNormalizedType(a: NormalizedType, b: NormalizedType): Normal
         else
             -- `"a" | string` and `string | "a"` => `string`
             -- `(string & ~"a") | string` and `string | (string & | "a")` => `string`
-            strings = { cofinite = false }
+            strings = { cofinite = true, singletons = {} }
         end
     else
         -- One is `never`.
@@ -420,12 +436,15 @@ local function unionNormalizedType(a: NormalizedType, b: NormalizedType): Normal
     local lists = nil
 
     if a.lists and b.lists then
-        if a.lists.items and b.lists.items then
-            local r1 = isSubtypeOf(a.lists.items, b.lists.items)
-            local r2 = isSubtypeOf(b.lists.items, a.lists.items)
+        local aItems = a.lists.items
+        local bItems = b.lists.items
+
+        if aItems and bItems then
+            local r1 = isSubtypeOf(aItems, bItems)
+            local r2 = isSubtypeOf(bItems, aItems)
 
             if r1.Holds and r2.Holds then
-                lists = { items = a.lists.items }
+                lists = { items = aItems }
             else
                 -- Reading from it would be a union, writing to it would be an intersection.
                 -- This is not representible currently.
@@ -497,108 +516,130 @@ local function unionNormalizedType(a: NormalizedType, b: NormalizedType): Normal
 end
 
 local function intersectNormalizedType(a: NormalizedType, b: NormalizedType): NormalizedType
-    local n = normalizedNever()
+    local errors = a.errors or b.errors
+    local nils = a.nils and b.nils
+    local numbers = a.numbers and b.numbers
 
-    n.Error = a.Error or b.Error
-    n.Nil = a.Nil and b.Nil
-    n.Number = a.Number and b.Number
+    local booleans = {
+        hasTrue = a.booleans.hasTrue and b.booleans.hasTrue,
+        hasFalse = a.booleans.hasFalse and b.booleans.hasFalse
+    }
 
-    if a.Boolean and b.Boolean then
-        if a.Boolean.Value == nil then
-            n.Boolean = { Value = b.Boolean.Value }
-        elseif b.Boolean.Value == nil then
-            n.Boolean = { Value = a.Boolean.Value }
-        elseif a.Boolean.Value ~= b.Boolean.Value then
-            -- `true` & `false` == `never`, leave it be.
+    local strings = { cofinite = false, singletons = {} }
+
+    if a.strings and b.strings then
+        local aStrings = a.strings
+        local bStrings = b.strings
+        local aSingles = aStrings.singletons
+        local bSingles = bStrings.singletons
+
+        if aSingles and bSingles then
+            local singles: { [string]: true } = {}
+
+            if aStrings.cofinite == bStrings.cofinite then
+                for s, _ in aSingles do
+                    if bSingles[s] then
+                        singles[s] = true
+                    end
+                end
+
+                strings = { cofinite = aStrings.cofinite, singletons = singles }
+            else
+                for s, _ in aSingles do
+                    if not bSingles[s] then
+                        singles[s] = true
+                    end
+                end
+
+                strings = { cofinite = aStrings.cofinite, singletons = singles }
+            end
         else
-            assert(a.Boolean.Value == b.Boolean.Value)
-            n.Boolean = a.Boolean
+            strings = if aSingles then aStrings
+                        else if bSingles then bStrings
+                        else { cofinite = true, singletons = {} }
         end
     end
 
-    if a.String and b.String then
-        local mySingles = n.String.Singletons
-        local withSingles = with.String.Singletons
+    local lists = nil
 
-        if mySingles and withSingles then
-            local removed = false
+    if a.lists and b.lists then
+        local aItems = a.lists.items
+        local bItems = b.lists.items
 
-            repeat
-                removed = false
+        if aItems and bItems then
+            local r1 = isSubtypeOf(aItems, bItems)
+            local r2 = isSubtypeOf(bItems, aItems)
 
-                for i, s in mySingles do
-                    local found = table.find(withSingles, s) ~= nil
+            if r1.Holds and r2.Holds then
+                lists = { items = aItems }
+            else
+                -- Reading from it would be an intersection, writing to it would be an union (I think).
+                -- This is not representible currently.
+                lists = { items = normalizedNever() }
+            end
+        else
+            lists = { items = aItems or bItems }
+        end
+    end
 
-                    if not found and not with.String.Cofinite and not n.String.Cofinite then
-                        table.remove(mySingles, i)
-                        removed = true
-                    end
-                end
-            until not removed
+    local functions = nil
 
-            if n.String.Cofinite and with.String.Cofinite then
-                for i, s in withSingles do
-                    local found = table.find(mySingles, s) ~= nil
+    if a.functions and b.functions then
+        local aComponents = a.functions.components
+        local bComponents = b.functions.components
 
-                    if not found then
-                        table.insert(mySingles, s)
+        if aComponents and bComponents then
+            local components = table.create<<NormalizedFunctionComponentType>>(#aComponents + #bComponents)
+            -- TODO luau cast.
+            table.move(aComponents :: any, 1, #aComponents, 1, components)
+
+            for _, bComponent in bComponents do
+                for i, aComponent in components do
+                    if isFunctionSubtypeOf(bComponent, aComponent).Holds then
+                        components[i] = bComponent
                     end
                 end
             end
-        elseif not mySingles and withSingles then
-            n.String.Singletons = table.clone(withSingles) -- `string & "a" = "a"`.
-            n.String.Cofinite = with.String.Cofinite
-        end
-    else
-        n.String = nil
-    end
 
-    if n.List and not with.List then
-        n.List = nil
-    elseif n.List and not n.List.Items and with.List and with.List.Items then
-        n.List.Items = with.List.Items
-    elseif n.List and n.List.Items and with.List and with.List.Items then
-        if not isSubtypeOf(n.List.Items, with.List.Items).Holds or not isSubtypeOf(with.List.Items, n.List.Items).Holds then
-            n.List.Items = normalizedNever()
-        end
-    end
-
-    if n.Function and with.Function and with.Function.Components then
-        if n.Function.Components then
-            table.move(with.Function.Components, 1, #with.Function.Components, #n.Function.Components + 1, n.Function.Components)
+            functions = { components = components }
         else
-            n.Function.Components = with.Function.Components
-        end
-    -- `function` & `(T) -> U` = `(T) -> U`
-    elseif n.Function and not n.Function.Components and with.Function and with.Function.Components then
-        n.Function.Components = table.clone(with.Function.Components)
-    elseif n.Function and not with.Function then
-        n.Function = nil
-    end
-
-    if n.Generic then
-        for gen, intersect in n.Generic do
-            intersectNormalizedType(intersect, with)
+            functions = { components = aComponents or bComponents }
         end
     end
 
-    if n.Free then
-        for free, intersect in n.Free do
-            intersectNormalizedType(intersect, with)
+    local pending: { [Type]: NormalizedType }? = nil
+
+    if a.pending then
+        pending = {}
+
+        for ty, intersect in a.pending do
+            pending[ty] = intersectNormalizedType(intersect, b)
         end
     end
 
-    if with.Pending then
-        if not n.Pending then
-            n.Pending = table.clone(with.Pending)
-        else
-            for i = #n.Pending, 1, -1 do
-                if not table.find(with.Pending, n.Pending[i]) then
-                    table.remove(n.Pending, i)
-                end
+    if b.pending then
+        pending = pending or {}
+        assert(pending)
+
+        for ty, intersect in b.pending do
+            if pending[ty] then
+                pending[ty] = intersectNormalizedType(pending[ty], a)
+            else
+                pending[ty] = intersectNormalizedType(intersect, a)
             end
         end
     end
+
+    return {
+        errors = errors,
+        nils = nils,
+        booleans = booleans,
+        numbers = numbers,
+        strings = strings,
+        lists = lists,
+        functions = functions,
+        pending = pending,
+    }
 end
 
 local function normalize_(ty: Type, seen: { [Type]: NormalizedType }): NormalizedType
@@ -932,7 +973,7 @@ local function normalizedFunctionComponentToString(nfc: NormalizedFunctionCompon
     return str
 end
 
-local function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionType): SubtypingResult
+function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionType): SubtypingResult
     -- `((A) -> B) & ((C) -> D) & ... <: function`
     if not b.Components then
         return subtypeSuccess()

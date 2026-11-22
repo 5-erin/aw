@@ -1332,41 +1332,40 @@ local typeEnv: { [string]: Type? }
 type ToStringOptions = {
     read Alias: string?,
     read HideFreeTypeBounds: boolean?,
-    read IsNotMainFreeType: boolean?,
     read DoNotTryNegating: boolean?,
-    Seen: { [Type]: true? }?,
-    Recursive: { [Type]: string? }?,
-    CurrentlyRecursing: Type?,
+}
+
+type ToStringState = {
+    options: ToStringOptions,
+    inside: { [Type]: true? },
+    recursive: { [Type]: string? },
+    currentlyRecursing: Type?,
 }
 
 local toStringRecursiveTypeCount = 0
 
-local function typeToString_(ty: Type, opts: ToStringOptions): string
-    opts.Seen = opts.Seen or {}
+local function typeToString_(ty: Type, state: ToStringState): string
+    local opts = state.options
 
-    if opts.CurrentlyRecursing ~= ty and ty.Kind ~= "Generic" then
-        local rec = opts.Recursive and opts.Recursive[ty]
+    if state.currentlyRecursing ~= ty then
+        local rec = state.recursive[ty]
         if rec then
             return rec
         end
 
-        assert(opts.Seen)
-        if opts.Seen[ty] then
+        if state.inside[ty] then
             toStringRecursiveTypeCount += 1
 
             local name = ty.AliasName or `t{ toStringRecursiveTypeCount }`
-            opts.Recursive = opts.Recursive or {}
-            assert(opts.Recursive)[ty] = name
+            state.recursive[ty] = name
 
             return name
         end
     end
 
-    assert(opts.Seen)[ty] = true
-
-    if ty.AliasName and ty.AliasName ~= opts.Alias and ty.Kind ~= "PendingExpansion" then
-        return ty.AliasName
-    end
+    state.currentlyRecursing = nil
+    state.inside[ty] = true
+    local str
 
     local function genericTypeName(tyvar: GenericType)
         if tyvar.Name then
@@ -1411,34 +1410,34 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
         end
     end
 
-    if ty.Kind == "error" then
-        return "*error*"
+    if ty.AliasName and ty.AliasName ~= opts.Alias and ty.Kind ~= "PendingExpansion" then
+        str = ty.AliasName
+    elseif ty.Kind == "error" then
+        str = "*error*"
     elseif ty.Kind == "never" then
-        return "never"
+        str = "never"
     elseif ty.Kind == "unknown" then
-        return "unknown"
+        str = "unknown"
     elseif ty.Kind == "Primitive" then
-        return ty.Primitive
-
+        str = ty.Primitive
     elseif ty.Kind == "List" then
-        return `\{ { typeToString_(ty.Items, opts) } }`
-
+        str = `\{ { typeToString_(ty.Items, state) } }`
     elseif ty.Kind == "Singleton" then
         if typeof(ty.Value) == "string" then
-            return `"{ ty.Value }"`
+            str = `"{ ty.Value }"`
         else
-            return tostring(ty.Value)
+            str = tostring(ty.Value)
         end
     elseif ty.Kind == "Generic" then
-        return genericTypeName(ty)
+        str = genericTypeName(ty)
     elseif ty.Kind == "Function" then
-        local str = ""
+        str = ""
 
         if #ty.Generics > 0 then
             local gens = table.create<<string>>(#ty.Generics)
 
             for i, gen in ty.Generics do
-                gens[i] = typeToString_(gen, opts)
+                gens[i] = typeToString_(gen, state)
             end
 
             str = `<{ table.concat(gens, ", ") }>`
@@ -1447,7 +1446,7 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
         local params = table.create<<string>>(#ty.Parameters + 1)
 
         for i, param in ty.Parameters do
-            params[i] = typeToString_(param, opts)
+            params[i] = typeToString_(param, state)
         end
 
         -- if ty.Variadic.Kind ~= "never" then
@@ -1455,26 +1454,24 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
         -- end
 
         str ..= `({ table.concat(params, ", ") }) -> `
-        str ..= if ty.Returns then typeToString_(ty.Returns, opts) else "()"
-
-        return str
+        str ..= if ty.Returns then typeToString_(ty.Returns, state) else "()"
 
     elseif ty.Kind == "PendingExpansion" then
         local arguments = table.create<<string>>(#ty.Arguments)
 
         for i, a in ty.Arguments do
-            arguments[i] = typeToString_(a, opts)
+            arguments[i] = typeToString_(a, state)
         end
 
-        return `{ ty.Name }<{ table.concat(arguments, ", ") }>`
+        str = `{ ty.Name }<{ table.concat(arguments, ", ") }>`
 
     elseif ty.Kind == "Negation" then
-        local inner = typeToString_(ty.Negated, opts)
+        local inner = typeToString_(ty.Negated, state)
 
         if ty.Negated.Kind == "Union" or ty.Negated.Kind == "Intersection" then
-            return `~({ inner })`
+            str = `~({ inner })`
         else
-            return `~{ inner }`
+            str = `~{ inner }`
         end
 
     elseif ty.Kind == "Union" then
@@ -1482,7 +1479,7 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
         local length = 0
 
         for i, c in ty.Components do
-            local ts = typeToString_(c, opts)
+            local ts = typeToString_(c, state)
             length += #ts
 
             if c.Kind == "Union" or c.Kind == "Intersection" then
@@ -1492,13 +1489,14 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
             end
         end
 
-        return table.concat(tys, if length < 24 then " | " else "\n  | ")
+        str = table.concat(tys, if length < 24 then " | " else "\n  | ")
+
     elseif ty.Kind == "Intersection" then
         local tys = table.create<<string>>(#ty.Components)
         local length = 0
 
         for i, c in ty.Components do
-            local ts = typeToString_(c, opts)
+            local ts = typeToString_(c, state)
             length += #ts
 
             if c.Kind == "Union" or c.Kind == "Intersection" then
@@ -1508,56 +1506,53 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
             end
         end
 
-        return table.concat(tys, if length < 24 then " & " else "\n  & ")
-    elseif ty.Kind == "Free" then
-        local str = freeTypeName(ty)
+        str = table.concat(tys, if length < 24 then " & " else "\n  & ")
 
-        if opts.IsNotMainFreeType then
-            str  = string.sub(str, 2, #str) -- Remove `'`.
-        end
+    elseif ty.Kind == "Free" then
+        str = freeTypeName(ty)
 
         if not opts.HideFreeTypeBounds then
             if ty.UpperBound.Kind ~= "unknown" then
-                str ..= ` <: { typeToString_(ty.UpperBound, { IsNotMainFreeType = true, Seen = opts.Seen, Recursive = opts.Recursive, CurrentlyRecursing = opts.CurrentlyRecursing }) }`
+                str ..= ` <: { typeToString_(ty.UpperBound, state) }`
             end
 
             if ty.LowerBound.Kind ~= "never" then
-                str = `{ typeToString_(ty.LowerBound, { IsNotMainFreeType = true, Seen = opts.Seen, Recursive = opts.Recursive, CurrentlyRecursing = opts.CurrentlyRecursing }) } <: ` .. str
+                str = `{ typeToString_(ty.LowerBound, state) } <: ` .. str
             end
-        end
 
-        return str
+            str = `({ str })`
+        end
     else
         unreachable(ty.Kind)
         error(`Unreachable.`)
     end
+
+    state.inside[ty] = nil
+    return str
 end
 
 local function typeToString_inner(ty, tsopts: ToStringOptions?)
     toStringRecursiveTypeCount = 0
     local opts: ToStringOptions = tsopts or {}
+    local state: ToStringState = {
+        options = opts,
+        isMainFreeType = true,
+        inside = {},
+        recursive = {},
+        currentlyRecursing = nil,
+    }
 
-    if opts.Seen then
-        table.clear(opts.Seen)
-    else
-        opts.Seen = {}
-    end
+    typeToString_(ty, state)
 
-    if opts.Recursive then
-        table.clear(opts.Recursive)
-    else
-        opts.Recursive = {}
-    end
+    state.currentlyRecursing = ty
+    local str = typeToString_(ty, state)
 
-    opts.CurrentlyRecursing = nil
-    local str = typeToString_(ty, opts)
-
-    if opts.Recursive then
+    if state.recursive then
         toStringRecursiveTypeCount = -math.huge
 
-        for ty, name in opts.Recursive do
-            opts.CurrentlyRecursing = ty
-            str ..= `\nwhere { name } = { typeToString_(ty, opts) }`
+        for ty, name in state.recursive do
+            state.currentlyRecursing = ty
+            str ..= `\nwhere { name } = { typeToString_(ty, state) }`
         end
     end
 
@@ -1767,11 +1762,11 @@ local function substituteAllIn(ty: Type, substitutions: { read [Type]: Type }, t
         return ty
     end
 
+    traversed[ty] = true
+
     if substitutions[ty] then
         return substituteAllIn(substitutions[ty], substitutions, traversed)
     end
-
-    traversed[ty] = true
 
     local replacement = ty
 

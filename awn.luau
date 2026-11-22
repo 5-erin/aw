@@ -878,6 +878,42 @@ local function normalizedString(singleton: string?)
     return normalize(if singleton == nil then stringType else singletonType(singleton))
 end
 
+local function checkBoundsConsistency(changes: { read RequiredBoundsChange }): { Type }
+    local erroneousSet = {}
+    local stored = {}
+
+    for _, change in changes do
+        local currently = stored[change.Target] or {
+            upper = change.IntersectUpperWith or unknownType,
+            lower = change.UnionLowerWith or neverType,
+        }
+
+        if change.IntersectUpperWith then
+            currently.upper = makeIntersection(currently.upper, change.IntersectUpperWith)
+        else
+            assert(change.UnionLowerWith)
+            currently.lower = makeUnion(currently.lower, change.UnionLowerWith)
+        end
+
+        local consistencyResult = awn.isSubtypeOf(normalize(currently.lower), normalize(currently.upper))
+
+        if not consistencyResult.holds then
+            -- NOTE: Stringification won't have the actual bounds.
+            log(`!!! Free type bounds mismatch for '{ awn.typeToString(change.Target) }': { consistencyResult.failedPath } !!!`)
+            erroneousSet[change.Target] = true
+        end
+
+        stored[change.Target] = currently
+    end
+
+    local erroneous = {}
+    for failed, _ in erroneousSet do
+        table.insert(erroneous, failed)
+    end
+
+    return erroneous
+end
+
 local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Type }
     local erroneousSet = {}
 
@@ -1059,14 +1095,17 @@ function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctio
                 if instantiate then
                     local aFn = normalizedFunctionComponentToFunctionType(ca)
                     local bFn = normalizedFunctionComponentToFunctionType(cb)
-                    local instantiated, erroneous, ftyToGeneric = awn.instantiateGenericsAtCallsite(aFn, bFn)
+                    local instantiated, erroneous, ftyToGeneric, bounds = awn.instantiateGenericsAtCallsite(aFn, bFn, false)
+                    assert(bounds)
 
                     for _, free in erroneous do
                         local gen = ftyToGeneric[free]
+                        local bound = bounds[free]
+                        assert(bound)
                         assert(gen)
                         assert(free.Kind == "Free")
 
-                        table.insert(failed, `'{ awn.typeToString(gen) }' was required to be a subtype of '{ awn.typeToString(free.UpperBound) }' while being called with '{ awn.typeToString(free.LowerBound) }'.`)
+                        table.insert(failed, `'{ awn.typeToString(gen) }' would have to be a subtype of '{ awn.typeToString(bound.upper) }' while being called with '{ awn.typeToString(bound.lower) }'.`)
                         instantiationFailed = true
                     end
 
@@ -1337,12 +1376,11 @@ type ToStringOptions = {
 
 type ToStringState = {
     options: ToStringOptions,
+    recursiveTypeCount: number,
     inside: { [Type]: true? },
     recursive: { [Type]: string? },
     currentlyRecursing: Type?,
 }
-
-local toStringRecursiveTypeCount = 0
 
 local function typeToString_(ty: Type, state: ToStringState): string
     local opts = state.options
@@ -1354,9 +1392,9 @@ local function typeToString_(ty: Type, state: ToStringState): string
         end
 
         if state.inside[ty] then
-            toStringRecursiveTypeCount += 1
+            state.recursiveTypeCount += 1
 
-            local name = ty.AliasName or `t{ toStringRecursiveTypeCount }`
+            local name = ty.AliasName or `t{ state.recursiveTypeCount }`
             state.recursive[ty] = name
 
             return name
@@ -1410,7 +1448,7 @@ local function typeToString_(ty: Type, state: ToStringState): string
         end
     end
 
-    if ty.AliasName and ty.AliasName ~= opts.Alias and ty.Kind ~= "PendingExpansion" then
+    if ty.AliasName and ty.AliasName ~= opts.Alias then
         str = ty.AliasName
     elseif ty.Kind == "error" then
         str = "*error*"
@@ -1512,15 +1550,21 @@ local function typeToString_(ty: Type, state: ToStringState): string
         str = freeTypeName(ty)
 
         if not opts.HideFreeTypeBounds then
+            local showedBounds = false
+
             if ty.UpperBound.Kind ~= "unknown" then
                 str ..= ` <: { typeToString_(ty.UpperBound, state) }`
+                showedBounds = true
             end
 
             if ty.LowerBound.Kind ~= "never" then
                 str = `{ typeToString_(ty.LowerBound, state) } <: ` .. str
+                showedBounds = true
             end
 
-            str = `({ str })`
+            if showedBounds then
+                str = `({ str })`
+            end
         end
     else
         unreachable(ty.Kind)
@@ -1532,11 +1576,10 @@ local function typeToString_(ty: Type, state: ToStringState): string
 end
 
 local function typeToString_inner(ty, tsopts: ToStringOptions?)
-    toStringRecursiveTypeCount = 0
     local opts: ToStringOptions = tsopts or {}
     local state: ToStringState = {
         options = opts,
-        isMainFreeType = true,
+        recursiveTypeCount = 0,
         inside = {},
         recursive = {},
         currentlyRecursing = nil,
@@ -1548,7 +1591,7 @@ local function typeToString_inner(ty, tsopts: ToStringOptions?)
     local str = typeToString_(ty, state)
 
     if state.recursive then
-        toStringRecursiveTypeCount = -math.huge
+        state.recursiveTypeCount = -math.huge
 
         for ty, name in state.recursive do
             state.currentlyRecursing = ty
@@ -1566,15 +1609,11 @@ local function typeToString(ty, tsopts: ToStringOptions?)
 
     if tryNegationInStringification and (not tsopts or not tsopts.DoNotTryNegating) then
         local norm = normalize(ty)
-        if not hasNonNegatables(norm) then
+        if not isUnknown(norm) and not hasNonNegatables(norm) then
             local negated = negate(norm)
-            local negatedString = normalizationToString(negated, { DoNotTryNegating = true })
 
-            if string.find(negatedString, "|") or string.find(negatedString, "&") then
-                negatedString = `~({ negatedString })`
-            else
-                negatedString = "~" .. negatedString
-            end
+            local normToType = awn.normalizationToType(negated)
+            local negatedString = typeToString(negationType(normToType), { DoNotTryNegating = true })
 
             if #negatedString < #normalString then
                 return negatedString
@@ -1727,16 +1766,20 @@ local typeAssociationsOrdered = {}
 
 -- `Sub <: Super`. Can modify bounds of either if either are Free.
 -- Returns the list of free types with erroneous bounds, if there were any.
-local function subtypingRelation(sub: Type, super: Type): { Type }
+local function subtypingRelation(sub: Type, super: Type, applyBounds: boolean?): ({ Type }, { read RequiredBoundsChange })
     log(`Relation: '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
 
     sub, super = awn.reduceTypeFunctions(sub), awn.reduceTypeFunctions(super)
     local result = isSubtypeOf(normalize(sub), normalize(assert(super))) -- TODO luau assert
 
     if result.holds then
-        return applyBoundsChanges(result.requiredBoundsChanges)
+        if applyBounds ~= false then
+            return applyBoundsChanges(result.requiredBoundsChanges), result.requiredBoundsChanges
+        else
+            return checkBoundsConsistency(result.requiredBoundsChanges), result.requiredBoundsChanges
+        end
     else
-        return {}
+        return {}, {}
     end
 end
 
@@ -1757,54 +1800,50 @@ local function constrainSubtype(state: InferenceState, position: caw.Position, s
     log("")
 end
 
-local function substituteAllIn(ty: Type, substitutions: { read [Type]: Type }, traversed: { [Type]: true }): Type
-    if traversed[ty] then
+type SubstitutionState = {
+    substitutions: { read [Type]: Type? },
+    traversed: { [Type]: true? },
+    inside: { [Type]: true? },
+}
+
+local function substituteAllIn_(ty: Type, state: SubstitutionState): Type
+    if state.inside[ty] then
         return ty
     end
 
-    traversed[ty] = true
-
-    if substitutions[ty] then
-        return substituteAllIn(substitutions[ty], substitutions, traversed)
+    local fullSub = state.substitutions[ty]
+    if fullSub then
+        return substituteAllIn_(fullSub, state)
     end
 
+    state.inside[ty] = true
     local replacement = ty
 
     if ty.Kind == "error" or ty.Kind == "never" or ty.Kind == "unknown"
-        or ty.Kind == "Primitive" or ty.Kind == "Singleton"
+        or ty.Kind == "Primitive" or ty.Kind == "Singleton" or ty.Kind == "Generic"
+        or ty.Kind == "Free"
     then
         replacement = ty
     elseif ty.Kind == "List" then
-        replacement = listType(substituteAllIn(ty.Items, substitutions, traversed))
-
-    elseif ty.Kind == "Generic" then
-        replacement = if substitutions[ty] then substituteAllIn(substitutions[ty], substitutions, traversed) else ty
-    elseif ty.Kind == "Free" then
-        if ty.LowerBound.Kind ~= "never" and ty.UpperBound.Kind == "unknown" then
-            replacement = substituteAllIn(ty.LowerBound, substitutions, traversed)
-        elseif ty.UpperBound.Kind ~= "unknown" then
-            replacement = substituteAllIn(ty.UpperBound, substitutions, traversed)
-        else
-            replacement = ty
-        end
+        replacement = listType(substituteAllIn_(ty.Items, state))
     elseif ty.Kind == "Function" then
         local params = table.create<<Type>>(#ty.Parameters)
 
         for i, param in ty.Parameters do
-            params[i] = substituteAllIn(param, substitutions, traversed)
+            params[i] = substituteAllIn_(param, state)
         end
 
-        local rets = if ty.Returns then substituteAllIn(ty.Returns, substitutions, traversed) else nil
-        replacement = functionType(ty.Generics, params, substituteAllIn(ty.Variadic, substitutions, traversed), rets)
+        local rets = if ty.Returns then substituteAllIn_(ty.Returns, state) else nil
+        replacement = functionType(ty.Generics, params, substituteAllIn_(ty.Variadic, state), rets)
 
     elseif ty.Kind == "Negation" then
-        replacement = negationType(substituteAllIn(ty.Negated, substitutions, traversed))
+        replacement = negationType(substituteAllIn_(ty.Negated, state))
 
     elseif ty.Kind == "Union" then
         local components = table.create<<Type>>(#ty.Components)
 
         for i, c in ty.Components do
-            components[i] = substituteAllIn(c, substitutions, traversed)
+            components[i] = substituteAllIn_(c, state)
         end
 
         replacement = unionType(components)
@@ -1813,7 +1852,7 @@ local function substituteAllIn(ty: Type, substitutions: { read [Type]: Type }, t
         local components = table.create<<Type>>(#ty.Components)
 
         for i, c in ty.Components do
-            components[i] = substituteAllIn(c, substitutions, traversed)
+            components[i] = substituteAllIn_(c, state)
         end
 
         replacement = intersectionType(components)
@@ -1822,7 +1861,7 @@ local function substituteAllIn(ty: Type, substitutions: { read [Type]: Type }, t
         local arguments = table.create<<Type>>(#ty.Arguments)
 
         for i, a in ty.Arguments do
-            arguments[i] = substituteAllIn(a, substitutions, traversed)
+            arguments[i] = substituteAllIn_(a, state)
         end
 
         replacement = pendingExpansionType(ty.Name, arguments)
@@ -1831,8 +1870,19 @@ local function substituteAllIn(ty: Type, substitutions: { read [Type]: Type }, t
         error(`Unreachable.`)
     end
 
-    traversed[replacement] = true
+    state.traversed[replacement] = true
+    state.traversed[ty] = true
+
+    state.inside[replacement] = nil
     return replacement
+end
+
+local function substituteAllIn(ty: Type, substitutions: { read [Type]: Type? }): Type
+    return substituteAllIn_(ty, {
+        substitutions = substitutions,
+        traversed = {},
+        inside = {},
+    })
 end
 
 type FreeTypeSubstitution = {
@@ -1840,35 +1890,54 @@ type FreeTypeSubstitution = {
     With: Type,
 }
 
+type GatherFreeTypeSubstitutionsOptions = {
+    read expression: caw.Expression?,
+    read polarity: Polarity,
+    read alwaysConcretize: boolean,
+    read bounds: { read [Type]: { read upper: Type, read lower: Type }? }?,
+}
+
 type GatherFreeTypeSubstitutionsState = {
-    Expression: caw.Expression?,
-    Substitutions: { [Type]: Type },
-    Polarities: { [Type]: Polarity },
-    Generics: { Type },
-    Polarity: Polarity,
-    AlwaysConcretize: boolean,
-    Seen: { [Type]: true? }?,
+    options: GatherFreeTypeSubstitutionsOptions,
+    substitutions: { [Type]: Type },
+    generics: { Type },
+
+    polarities: { [Type]: Polarity },
+    polarity: Polarity,
+    inside: { [Type]: true? },
 }
 
 local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsState, ty: Type, name: string)
-    assert(state.Seen)
+    local opts = state.options
 
-    if state.Seen[ty] then
+    if state.inside[ty] then
         return
     end
-    state.Seen[ty] = true
+    state.inside[ty] = true
 
     if ty.Kind == "Free" then
-        local previous = state.Substitutions[ty]
+        local upper = ty.UpperBound
+        local lower = ty.LowerBound
 
-        if previous and not state.AlwaysConcretize then
-            local prevPolarity = assert(state.Polarities[ty])
+        if opts.bounds then
+            local overwritten = opts.bounds[ty]
+            if overwritten then
+                upper = overwritten.upper
+                lower = overwritten.lower
+            end
+        end
 
-            if prevPolarity == state.Polarity then
+        local previous = state.substitutions[ty]
+
+        if previous and not opts.alwaysConcretize then
+            local prevPolarity = assert(state.polarities[ty])
+
+            if prevPolarity == state.polarity then
                 -- Already all ok.
+                state.inside[ty] = nil
                 return
             else
-                local normUpper = normalize(ty.UpperBound)
+                local normUpper = normalize(upper)
                 local replacement = nil
 
                 if prevPolarity == "Mixed" then
@@ -1878,10 +1947,10 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
                     if isUnknown(normUpper) then
                         -- If there's no constraint, generalize.
                         replacement = genericType()
-                        table.insert(state.Generics, replacement)
+                        table.insert(state.generics, replacement)
                     else
                         -- TODO add explanatory snippet for this branch...
-                        log(`{ typeToString(ty, { HideFreeTypeBounds = true }) } upper bound '{ typeToString(ty.UpperBound) }' will be clipped for intersection with '{ typeToString(previous) }'`)
+                        log(`{ typeToString(ty, { HideFreeTypeBounds = true }) } upper bound '{ typeToString(upper) }' will be clipped for intersection with '{ typeToString(previous) }'`)
 
                         intersect(normUpper, normalize(previous))
                         replacement = normalizationToType(normUpper)
@@ -1891,61 +1960,96 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
 
                     if isUnknown(normUpper) then
                         replacement = genericType()
-                        table.insert(state.Generics, replacement)
+                        table.insert(state.generics, replacement)
                     else
-                        log(`{ typeToString(ty, { HideFreeTypeBounds = true }) } will be clipped to its upper bound '{ typeToString(ty.UpperBound) }' even though it appears in an invariant position`)
+                        log(`{ typeToString(ty, { HideFreeTypeBounds = true }) } will be clipped to its upper bound '{ typeToString(upper) }' even though it appears in an invariant position`)
 
-                        replacement = ty.UpperBound
+                        replacement = upper
                     end
                 end
 
-                state.Substitutions[ty] = replacement
-                state.Polarities[ty] = "Mixed"
+                state.substitutions[ty] = replacement
+                state.polarities[ty] = "Mixed"
+                state.inside[ty] = nil
                 return
             end
         end
 
-        if state.Polarity ~= "Positive" and isNever(normalize(ty.UpperBound)) then
+        if state.polarity ~= "Positive" and isNever(normalize(upper)) then
             -- No source expression = don't report.
-            if state.Expression then
+            if opts.expression then
                 local nameCorrected = string.upper(string.sub(name, 1, 1)) .. string.sub(name, 2, #name)
-                errorReport(`{ nameCorrected } has been reduced to never, this function is not callable with any value.`, state.Expression.Position)
+                errorReport(`{ nameCorrected } has been reduced to never, this function is not callable with any value.`, opts.expression.Position)
 
-                state.Substitutions[ty] = neverType
+                state.substitutions[ty] = neverType
             end
         else
-            local sub = if state.Polarity == "Positive" then ty.LowerBound else ty.UpperBound
+            local sub = if state.polarity == "Positive" then lower else upper
 
-            -- TODO: If we don't do this, then generics are left as free types in implicit instantiations at call sites.
-            if not previous or not state.AlwaysConcretize or sub.Kind ~= "Free" then
-                state.Substitutions[ty] = sub
-            else
-                log(`Discarding substitution { typeToString(sub) } for { typeToString(ty) } ({ state.Polarity }) because { typeToString(previous) } was already set`)
+            --[=[
+            -- TODO
+
+            Consider:
+
+            function f(x, y)
+                x = y
+                y = x
+                return x
             end
 
-            log(`{ state.Polarity } { typeToString(ty) } => { typeToString(state.Substitutions[ty]) }`)
+            With the current code, the result is:
+
+            f: (t1, ('b <: t1)) -> t1
+            where t1 = ('a <: ('b <: t1))
+
+            if sub.Kind == "Free" then
+                gatherFreeTypeSubstitutions_(state, sub, name)
+
+                if state.Substitutions[sub] and state.Substitutions[sub] ~= ty then
+                    gatherFreeTypeSubstitutions_(state, state.Substitutions[sub], name)
+                    state.Substitutions[sub] = state.Substitutions[state.Substitutions[sub]]
+                end
+
+                if state.Substitutions[sub] == ty then
+                    if state.Polarity == "Positive" then
+                        sub = neverType
+                    else
+                        sub = unknownType
+                    end
+                end
+            end
+            ]=]--
+
+            -- TODO: If we don't do this, then generics are left as free types in implicit instantiations at call sites.
+            if not previous or not opts.alwaysConcretize or sub.Kind ~= "Free" then
+                state.substitutions[ty] = sub
+            else
+                log(`Discarding substitution { typeToString(sub) } for { typeToString(ty) } ({ state.polarity }) because { typeToString(previous) } was already set`)
+            end
+
+            log(`{ state.polarity } { typeToString(ty) } => { typeToString(state.substitutions[ty]) }`)
         end
 
-        state.Polarities[ty] = state.Polarity
+        state.polarities[ty] = state.polarity
 
-        gatherFreeTypeSubstitutions_(state, ty.UpperBound, name)
-        gatherFreeTypeSubstitutions_(state, ty.LowerBound, `lower bound of { name }`)
+        gatherFreeTypeSubstitutions_(state, upper, name)
+        gatherFreeTypeSubstitutions_(state, lower, `lower bound of { name }`)
 
     elseif ty.Kind == "List" then
-        local prevPolarity = state.Polarity
+        local prevPolarity = state.polarity
 
         -- Lists are invariant. Force it to be generic.
-        state.Polarity = "Negative"
+        state.polarity = "Negative"
         gatherFreeTypeSubstitutions_(state, ty.Items, name .. "[X]")
 
-        state.Polarity = "Positive"
+        state.polarity = "Positive"
         gatherFreeTypeSubstitutions_(state, ty.Items, name .. "[X]")
 
-        state.Polarity = prevPolarity
+        state.polarity = prevPolarity
 
     elseif ty.Kind == "Function" then
-        local prevPolarity = state.Polarity
-        state.Polarity = "Positive"
+        local prevPolarity = state.polarity
+        state.polarity = "Positive"
 
         for i, param in ty.Parameters do
             gatherFreeTypeSubstitutions_(state, param, `parameter { i } of { name }`)
@@ -1954,11 +2058,11 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
         gatherFreeTypeSubstitutions_(state, ty.Variadic, `variadic argument type of { name }`)
 
         if ty.Returns then
-            state.Polarity = "Negative"
+            state.polarity = "Negative"
             gatherFreeTypeSubstitutions_(state, ty.Returns, `return type of { name }`)
         end
 
-        state.Polarity = prevPolarity
+        state.polarity = prevPolarity
 
     elseif ty.Kind == "Union" or ty.Kind == "Intersection" then
         for i, c in (ty :: UnionType | IntersectionType).Components do -- TODO luau cast.
@@ -1967,19 +2071,19 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
     elseif ty.Kind == "Negation" then
         gatherFreeTypeSubstitutions_(state, ty.Negated, `negation of { name }`)
     elseif ty.Kind == "PendingExpansion" then
-        local prevPolarity = state.Polarity
+        local prevPolarity = state.polarity
 
-        state.Polarity = "Positive"
+        state.polarity = "Positive"
         for i, argument in ty.Arguments do
             gatherFreeTypeSubstitutions_(state, argument, `argument #{ i } of { name }`)
         end
 
-        state.Polarity = "Negative"
+        state.polarity = "Negative"
         for i, argument in ty.Arguments do
             gatherFreeTypeSubstitutions_(state, argument, `argument #{ i } of { name }`)
         end
 
-        state.Polarity = prevPolarity
+        state.polarity = prevPolarity
     elseif ty.Kind == "unknown" or ty.Kind == "never" or ty.Kind == "error" or ty.Kind == "Primitive"
         or ty.Kind == "Generic" or ty.Kind == "Singleton"
     then
@@ -1987,13 +2091,24 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
     else
         unreachable(ty.Kind)
     end
+
+    state.inside[ty] = nil
 end
 
-local function gatherFreeTypeSubstitutions(state: GatherFreeTypeSubstitutionsState, ty: Type, name: string)
-    state.Seen = state.Seen or {}
-    table.clear(assert(state.Seen))
+local function gatherFreeTypeSubstitutions(opts: GatherFreeTypeSubstitutionsOptions, ty: Type, name: string)
+    local state: GatherFreeTypeSubstitutionsState = {
+        options = opts,
+        substitutions = {},
+        generics = {},
+
+        polarities = {},
+        polarity = opts.polarity,
+        inside = {},
+    }
 
     gatherFreeTypeSubstitutions_(state, ty, name)
+    assert(next(state.inside) == nil)
+    return state
 end
 
 type InferenceState = {
@@ -2006,7 +2121,10 @@ type InferenceState = {
 }
 
 -- TODO: This is needed in `isFunctionSubtypeOf` and should not be using `subtypingRelation` as that modifies types.
-local function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type }, { [Type]: Type })
+local function instantiateGenericsAtCallsite(fn: Type, callsite: Type, applyBounds: boolean?): (Type, { Type }, { [Type]: Type }, { [Type]: { upper: Type, lower: Type } }?)
+    local initialFn = fn
+    log(`Trying to instantiate '{ typeToString(initialFn) }' with '{ typeToString(callsite) }'`)
+
     local gensToSubstitute = {}
     local ftyToGeneric = {}
     log("Generic substitutions:")
@@ -2026,28 +2144,61 @@ local function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, {
         fn = substituteAllIn(fn, gensToSubstitute, {})
     end
 
-    local erroneous = subtypingRelation(fn, callsite)
+    local erroneous, boundsChanges = subtypingRelation(fn, callsite, applyBounds)
+    local bounds: { [Type]: { upper: Type, lower: Type } }? = nil
 
-    local substitutions: GatherFreeTypeSubstitutionsState = {
-        Substitutions = {},
-        Polarities = {},
-        Generics = {},
-        Polarity = "Mixed",
-        AlwaysConcretize = true,
-    }
-    local newGens = {}
-    gatherFreeTypeSubstitutions(substitutions, fn, "function call")
+    if applyBounds == false then
+        local nowBounds = {}
+
+        for _, change in boundsChanges do
+            assert(change.Target.Kind == "Free")
+
+            local bound = nowBounds[change.Target] or {
+                upper = change.Target.UpperBound,
+                lower = change.Target.LowerBound,
+            }
+
+            if change.IntersectUpperWith then
+                bound.upper = makeIntersection(bound.upper, change.IntersectUpperWith)
+            else
+                assert(change.UnionLowerWith)
+                bound.lower = makeUnion(bound.lower, change.UnionLowerWith)
+            end
+
+            nowBounds[change.Target] = bound
+        end
+
+        bounds = nowBounds
+    else
+        bounds = nil
+    end
+
+    local concretizationResult = gatherFreeTypeSubstitutions(
+        {
+            polarity = "Mixed",
+            alwaysConcretize = true,
+            bounds = bounds,
+        },
+        fn,
+        "function call"
+    )
 
     if logInference then
         print(`Implicit generic instantiations:`)
-        for gen, ty in substitutions.Substitutions do
+        for gen, ty in concretizationResult.substitutions do
             print(`* { typeToString(gen) } => { typeToString(ty) }`)
         end
         print("")
     end
 
-    assert(#newGens == 0)
-    return awn.reduceTypeFunctions(substituteAllIn(fn, substitutions.Substitutions, {})), erroneous, ftyToGeneric
+    if #concretizationResult.generics > 0 then
+        print(`Internal error: introduced generics while concretizing '{ typeToString(fn) }' with '{ typeToString(callsite) }'`)
+    end
+
+    local instantiation = awn.reduceTypeFunctions(substituteAllIn(fn, concretizationResult.substitutions, {}))
+    log(`Instantiation: '{ typeToString(initialFn) }' ~ '{ typeToString(callsite) }' => '{ typeToString(instantiation) }'{ if #erroneous > 0 then " (**erroneous**)" else "" }`)
+
+    return instantiation, erroneous, ftyToGeneric, bounds
 end
 
 local function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnotation): Type
@@ -2422,19 +2573,26 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         state.ReturnType = prevRetTy
         state.Variadic = prevVarTy
 
-        local freeTypeSubstitutions: GatherFreeTypeSubstitutionsState = {
-            Expression = expr,
-            Substitutions = {},
-            Polarities = {},
-            Generics = {},
-            Polarity = "Unknown",
-            AlwaysConcretize = false,
+        local generalizerOptions: GatherFreeTypeSubstitutionsOptions = {
+            expression = expr,
+            alwaysConcretize = false,
+            polarity = "Unknown",
+        }
+
+        local generalizer: GatherFreeTypeSubstitutionsState = {
+            options = generalizerOptions,
+            substitutions = {},
+            generics = {},
+
+            polarities = {},
+            polarity = "Unknown",
+            inside = {},
         }
 
         log(`{ expr.Position.Line }:{ expr.Position.Column }: Eliminating free types: { typeToString(functionType(gens, params, varTy or neverType, if typeof(retTy) == "table" then retTy else nil)) }`)
 
         -- Inputs are negative.
-        freeTypeSubstitutions.Polarity = "Negative"
+        generalizer.polarity = "Negative"
 
         for i, param in expr.Function.Parameters do
             typeAssociations[param.Name] = nil
@@ -2442,46 +2600,52 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             local paramTy = params[i]
 
             if paramTy.Kind == "Free" then
-                gatherFreeTypeSubstitutions(freeTypeSubstitutions, paramTy, `parameter '{ param.Name }'`)
+                gatherFreeTypeSubstitutions_(generalizer, paramTy, `parameter '{ param.Name }'`)
             end
         end
 
         if varTy then
-            gatherFreeTypeSubstitutions(freeTypeSubstitutions, varTy, "...")
+            gatherFreeTypeSubstitutions_(generalizer, varTy, "...")
         end
 
         -- Outputs are positive.
-        freeTypeSubstitutions.Polarity = "Positive"
+        generalizer.polarity = "Positive"
 
         if typeof(retTy) == "table" then
-            gatherFreeTypeSubstitutions(freeTypeSubstitutions, retTy, "return type")
+            gatherFreeTypeSubstitutions_(generalizer, retTy, "return type")
         end
+
+        assert(next(generalizer.inside) == nil)
 
         if logInference then
             print("Free type substitutions:")
-            for fty, ty in freeTypeSubstitutions.Substitutions do
-                print(`* { typeToString(fty) } => { typeToString(ty) }{ if table.find(freeTypeSubstitutions.Generics, ty) then " (introduced generic)" else "" }`)
+            for fty, ty in generalizer.substitutions do
+                print(`* { typeToString(fty) } => { typeToString(ty) }{ if table.find(generalizer.generics, ty) then " (introduced generic)" else "" }`)
             end
             print("")
         end
 
-        local traversed: { [Type]: true } = {}
+        local substitutor: SubstitutionState = {
+            substitutions = generalizer.substitutions,
+            traversed = {},
+            inside = {},
+        }
 
         for i, param in params do
-            params[i] = substituteAllIn(param, freeTypeSubstitutions.Substitutions, traversed)
+            params[i] = substituteAllIn_(param, substitutor)
         end
 
         if varTy then
-            varTy = substituteAllIn(varTy, freeTypeSubstitutions.Substitutions, traversed)
+            varTy = substituteAllIn_(varTy, substitutor)
         else
             varTy = neverType
         end
 
         if typeof(retTy) == "table" then
-            retTy = substituteAllIn(retTy, freeTypeSubstitutions.Substitutions, traversed)
+            retTy = substituteAllIn_(retTy, substitutor)
         end
 
-        table.move(freeTypeSubstitutions.Generics, 1, #freeTypeSubstitutions.Generics, #gens + 1, gens)
+        table.move(generalizer.generics, 1, #generalizer.generics, #gens + 1, gens)
 
         -- Trim unused generics, e.g. `let x = function(f, y) return f(y) end`.
         local gensCheck = table.clone(gens)
@@ -2489,7 +2653,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         for _, gen in gensCheck do
             assert(gen.Kind == "Generic")
-            if gen.Name or traversed[gen] then
+            if gen.Name or substitutor.traversed[gen] then
                 table.insert(gens, gen)
             end
         end
@@ -2568,8 +2732,23 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local callsiteTy = functionType({}, arguments, neverType, expected)
 
         log(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
-        fnTy = instantiateGenericsAtCallsite(fnTy, callsiteTy)
-        awn.check(fnTy, callsiteTy, expr.Position)
+
+        local erroneous, ftyToGeneric
+        fnTy, erroneous, ftyToGeneric = instantiateGenericsAtCallsite(fnTy, callsiteTy)
+
+        if #erroneous > 0 then
+            for _, free in erroneous do
+                local gen = ftyToGeneric[free]
+                assert(free.Kind == "Free")
+
+                local target = if gen then `'{ awn.typeToString(gen) }'` else "Argument"
+                errorReport(`{ target } was expected to be '{ awn.typeToString(free.UpperBound) }' when returning, but was called in a way that it would be '{ awn.typeToString(free.LowerBound) }'.`, expr.Position)
+            end
+
+            return errorType
+        else
+            awn.check(fnTy, callsiteTy, expr.Position)
+        end
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
 

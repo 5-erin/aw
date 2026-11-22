@@ -7,6 +7,8 @@
 -- https://luau.org/news/2022-10-31-luau-semantic-subtyping/
 -- https://www.cduce.org/papers/gentle.pdf
 
+local awn = {}
+
 local caw = require("./caw")
 local logInference = false
 
@@ -127,7 +129,7 @@ type NormalizedFunctionType = {
     read components: { read NormalizedFunctionComponentType }?
 }
 
-type NormalizedType = {
+export type NormalizedType = {
     read errors:   boolean,
     read nils:     boolean,
     read booleans: NormalizedBooleanType,
@@ -141,8 +143,6 @@ type NormalizedType = {
     -- (by default, `unknown`.)
     read pending: { read [Type]: NormalizedType? }?,
 }
-
-local typeToString
 
 local function unreachable(x: never): never
     error(`Unexpected branch with value '{ x }' ({ typeof(x) }), this is an internal error.`)
@@ -252,6 +252,10 @@ local function errorReport(message, position: caw.Position): Type
 end
 
 local function makeUnion(a: Type, b: Type)
+    -- TODO luau cast.
+    a = a :: any
+    b = b :: any
+
     if a.Kind == "never" then
         return b
     elseif b.Kind == "never" then
@@ -279,6 +283,10 @@ local function makeUnion(a: Type, b: Type)
 end
 
 local function makeIntersection(a: Type, b: Type)
+    -- TODO luau cast.
+    a = a :: any
+    b = b :: any
+
     if a.Kind == "unknown" then
         return b
     elseif b.Kind == "unknown" then
@@ -383,10 +391,6 @@ local function deepCopy(tab: any): any
 
     return t
 end
-
-local isSubtypeOf
-local isFunctionSubtypeOf
-local isExactly
 
 -- Some types do not support negation with the current normalization implementation (discrete a.k.a. non-top lists and functions).
 -- The "pending" types (generics, type function instances, and free types), however, have no theoretical negation.
@@ -702,8 +706,6 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
     }
 end
 
-local normalizationToString
-
 local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
     --if seen[ty] then
     --    return normalize_(errorType(), {})
@@ -822,12 +824,8 @@ local function normalize(ty: Type): NormalizedType
     return normalize_(ty, {})
 end
 
-local isSupertypeOf
-local normalizationToType
-local normalizedFunctionComponentToFunctionType
-
 local function simplify(ty: Type)
-    return normalizationToType(normalize(ty))
+    return awn.normalizationToType(normalize(ty))
 end
 
 type RequiredBoundsChange =
@@ -904,7 +902,7 @@ local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Typ
         local consistencyResult = isSubtypeOf(normalize(change.Target.LowerBound), normalize(change.Target.UpperBound))
 
         if not consistencyResult.holds then
-            log(`Free type bounds mismatch for '{ typeToString(change.Target) }': '{ typeToString(change.Target.LowerBound) }' </: '{ typeToString(change.Target.UpperBound) }' - { consistencyResult.failedPath }`)
+            log(`Free type bounds mismatch for '{ awn.typeToString(change.Target) }': { consistencyResult.failedPath }`)
             erroneousSet[change.Target] = true
         end
     end
@@ -970,15 +968,12 @@ local function decomposeToSingletons(n: NormalizedType): { NormalizedType }?
     return singles
 end
 
-local substituteAllIn
-local instantiateGenericsAtCallsite
-
 local function normalizedFunctionComponentToString(nfc: NormalizedFunctionComponentType): string
     local gensStrings = table.create<<string>>(#nfc.generics)
     local paramStrings = table.create<<string>>(#nfc.parameters)
 
     for i, gen in nfc.generics do
-        gensStrings[i] = typeToString(gen)
+        gensStrings[i] = awn.typeToString(gen)
     end
 
     for i, param in nfc.parameters do
@@ -1026,7 +1021,8 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                     local result = isSubtypeOf(car, cb.returns)
 
                     if result.holds then
-                        table.move(result.requiredBoundsChanges, 1, #result.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
+                        -- TODO luau cast.
+                        table.move(result.requiredBoundsChanges, 1, #result.requiredBoundsChanges, #requiredChanges + 1, requiredChanges :: any)
                     else
                         return subtypeFailure(false, `With '{ normalizationToString(single) }': { result.failedPath }`)
                     end
@@ -1052,14 +1048,14 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                 if instantiate then
                     local aFn = normalizedFunctionComponentToFunctionType(ca)
                     local bFn = normalizedFunctionComponentToFunctionType(cb)
-                    local instantiated, erroneous, ftyToGeneric = instantiateGenericsAtCallsite(aFn, bFn)
+                    local instantiated, erroneous, ftyToGeneric = awn.instantiateGenericsAtCallsite(aFn, bFn)
 
                     for _, free in erroneous do
                         local gen = ftyToGeneric[free]
                         assert(gen)
                         assert(free.Kind == "Free")
 
-                        table.insert(failed, `'{ typeToString(gen) }' was required to be a subtype of '{ typeToString(free.UpperBound) }' while being called with '{ typeToString(free.LowerBound) }'.`)
+                        table.insert(failed, `'{ awn.typeToString(gen) }' was required to be a subtype of '{ awn.typeToString(free.UpperBound) }' while being called with '{ awn.typeToString(free.LowerBound) }'.`)
                         instantiationFailed = true
                     end
 
@@ -1080,7 +1076,8 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                     local paramResult = isSupertypeOf(param, cb.parameters[i])
 
                     if paramResult.holds then
-                        table.move(paramResult.requiredBoundsChanges, 1, #paramResult.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
+                        -- TODO luau cast.
+                        table.move(paramResult.requiredBoundsChanges, 1, #paramResult.requiredBoundsChanges, #requiredChanges + 1, requiredChanges :: any)
                     else
                         local paramStr = normalizationToString(cb.parameters[i])
                         table.insert(
@@ -1100,7 +1097,8 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                     local returnResult = isSubtypeOf(ca.returns, cb.returns)
 
                     if returnResult.holds then
-                        table.move(returnResult.requiredBoundsChanges, 1, #returnResult.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
+                        -- TODO luau cast.
+                        table.move(returnResult.requiredBoundsChanges, 1, #returnResult.requiredBoundsChanges, #requiredChanges + 1, requiredChanges :: any)
                     else
                         table.insert(
                             failed,
@@ -1169,7 +1167,7 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         for _, free in aFrees do
             table.insert(changes, {
                 Target = free,
-                IntersectUpperWith = normalizationToType(b),
+                IntersectUpperWith = awn.normalizationToType(b),
             })
         end
 
@@ -1190,7 +1188,7 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         for _, free in bFrees do
             table.insert(changes, {
                 Target = free,
-                UnionLowerWith = normalizationToType(a),
+                UnionLowerWith = awn.normalizationToType(a),
             })
         end
 
@@ -1275,7 +1273,7 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
                 local upperBoundResult = isSubtypeOf(upperBound, b)
 
                 if not upperBoundResult.holds then
-                    return subtypeFailure(surpressed, `Unexpected \`{ typeToString(ty) }\ & { normalizationToString(upperBound) }.`)
+                    return subtypeFailure(surpressed, `Unexpected \`{ awn.typeToString(ty) }\ & { normalizationToString(upperBound) }.`)
                 end
             end
         end
@@ -1305,8 +1303,9 @@ function isExactly(a: NormalizedType, b: NormalizedType): SubtypingResult
     end
 
     local boundsChanges = {}
-    table.move(r1.requiredBoundsChanges, 1, #r1.requiredBoundsChanges, 1, boundsChanges)
-    table.move(r2.requiredBoundsChanges, 1, #r2.requiredBoundsChanges, #boundsChanges + 1, boundsChanges)
+    -- TODO luau cast.
+    table.move(r1.requiredBoundsChanges :: any, 1, #r1.requiredBoundsChanges, 1, boundsChanges)
+    table.move(r2.requiredBoundsChanges :: any, 1, #r2.requiredBoundsChanges, #boundsChanges + 1, boundsChanges)
 
     return {
         holds = true,
@@ -1317,7 +1316,6 @@ end
 
 local genericTypeNameCount = 0
 local freeTypeNameCount = 0
-local reduceTypeFunctions
 local typeEnv: { [string]: Type? }
 
 type ToStringOptions = {
@@ -1508,19 +1506,13 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
         end
 
         if not opts.HideFreeTypeBounds then
-            local isNotMainFreeType = opts.IsNotMainFreeType
-
             if ty.UpperBound.Kind ~= "unknown" then
-                opts.IsNotMainFreeType = true
-                str ..= ` <: { typeToString_(ty.UpperBound, opts) }`
+                str ..= ` <: { typeToString_(ty.UpperBound, { IsNotMainFreeType = true, Seen = opts.Seen, Recursive = opts.Recursive, CurrentlyRecursing = opts.CurrentlyRecursing }) }`
             end
 
             if ty.LowerBound.Kind ~= "never" then
-                opts.IsNotMainFreeType = true
-                str = `{ typeToString_(ty.LowerBound, opts) } <: ` .. str
+                str = `{ typeToString_(ty.LowerBound, { IsNotMainFreeType = true, Seen = opts.Seen, Recursive = opts.Recursive, CurrentlyRecursing = opts.CurrentlyRecursing }) } <: ` .. str
             end
-
-            opts.IsNotMainFreeType = isNotMainFreeType
         end
 
         return str
@@ -1563,7 +1555,7 @@ end
 
 local tryNegationInStringification = true
 
-function typeToString(ty, tsopts: ToStringOptions?)
+local function typeToString(ty, tsopts: ToStringOptions?)
     local normalString = typeToString_inner(ty, tsopts)
 
     if tryNegationInStringification and (not tsopts or not tsopts.DoNotTryNegating) then
@@ -1587,7 +1579,7 @@ function typeToString(ty, tsopts: ToStringOptions?)
     return normalString
 end
 
-function normalizationToType(n: NormalizedType): Type
+local function normalizationToType(n: NormalizedType): Type
     local t: { Type } = {}
 
     if n.errors then
@@ -1746,15 +1738,12 @@ local typeEnvGenericParameters: { [Type]: { read Type }? } = {}
 local typeEnvOrdered: { string } = {}
 local typeAssociationsOrdered = {}
 
-local typeAnnotationToType
-local check
-
 -- `Sub <: Super`. Can modify bounds of either if either are Free.
 -- Returns the list of free types with erroneous bounds, if there were any.
 local function subtypingRelation(sub: Type, super: Type): { Type }
     log(`Relation: '{ typeToString(sub) }' <: '{ typeToString(super) }'`)
 
-    sub, super = reduceTypeFunctions(sub), reduceTypeFunctions(super)
+    sub, super = awn.reduceTypeFunctions(sub), awn.reduceTypeFunctions(super)
     local result = isSubtypeOf(normalize(sub), normalize(assert(super))) -- TODO luau assert
 
     if result.holds then
@@ -1767,16 +1756,16 @@ end
 -- `subtypingRelation`, but report error if relation does not hold.
 local function constrainSubtype(state: InferenceState, position: caw.Position, sub: Type, super: Type)
     log(`{ position.Line }:{ position.Column }: Constraining:`)
-    sub, super = reduceTypeFunctions(sub), reduceTypeFunctions(super)
+    sub, super = awn.reduceTypeFunctions(sub), awn.reduceTypeFunctions(super)
 
-    local erroneous = subtypingRelation(sub, super)
+    local erroneous = subtypingRelation(sub, assert(super)) -- TODO luau assert.
 
     for _, free in erroneous do
         assert(free.Kind == "Free")
-        print(`Internal error: { typeToString(free) } has incompatible bounds: { typeToString(simplify(free.LowerBound)) } </: { typeToString(simplify(free.UpperBound)) }`)
+        print(`Internal error: { typeToString(free) } has incompatible bounds: { typeToString(awn.simplify(free.LowerBound)) } </: { typeToString(awn.simplify(free.UpperBound)) }`)
     end
 
-    check(sub, super, position)
+    check(sub, assert(super), position) -- TODO luau assert.
 
     log("")
 end
@@ -1990,7 +1979,7 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
         state.Polarity = prevPolarity
 
     elseif ty.Kind == "Union" or ty.Kind == "Intersection" then
-        for i, c in ty.Components do
+        for i, c in (ty :: UnionType | IntersectionType).Components do -- TODO luau cast.
             gatherFreeTypeSubstitutions_(state, c, `a component of the { string.lower(ty.Kind) } of { name }`)
         end
     elseif ty.Kind == "Negation" then
@@ -2035,7 +2024,7 @@ type InferenceState = {
 }
 
 -- TODO: This is needed in `isFunctionSubtypeOf` and should not be using `subtypingRelation` as that modifies types.
-function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type }, { [Type]: Type })
+local function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type }, { [Type]: Type })
     local gensToSubstitute = {}
     local ftyToGeneric = {}
     log("Generic substitutions:")
@@ -2076,7 +2065,7 @@ function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, { Type 
     end
 
     assert(#newGens == 0)
-    return reduceTypeFunctions(substituteAllIn(fn, substitutions.Substitutions, {})), erroneous, ftyToGeneric
+    return awn.reduceTypeFunctions(substituteAllIn(fn, substitutions.Substitutions, {})), erroneous, ftyToGeneric
 end
 
 local function infer(state: InferenceState, expr: caw.Expression, expected: Type?): Type?
@@ -2863,7 +2852,7 @@ local function simplify_TypeFunction(arguments: { read Type }): ReductionResult
         return fail(`Expected exactly 1 type argument, got { #arguments } instead.`)
     end
 
-    return ok(simplify(arguments[1]))
+    return ok(awn.simplify(arguments[1]))
 end
 
 local typeFunctions: { [string]: TypeFunction? } = {
@@ -2881,7 +2870,7 @@ local typeFunctions: { [string]: TypeFunction? } = {
     },
 }
 
-function reduceTypeFunctions(ty: Type): Type
+local function reduceTypeFunctions(ty: Type): Type
     local inited: Type
 
     if ty.Kind == "error" or ty.Kind == "never" or ty.Kind == "unknown"
@@ -3026,7 +3015,7 @@ function check(inferred: Type, annotation: Type, position: caw.Position, printNo
     end
 end
 
-local function bidisemi(expressions: { read caw.Expression }, options: { read LogInference: boolean })
+function awn.run(expressions: { read caw.Expression }, options: { read LogInference: boolean })
     logInference = options.LogInference
 
     local state: InferenceState = {
@@ -3075,4 +3064,20 @@ local function bidisemi(expressions: { read caw.Expression }, options: { read Lo
     end
 end
 
-return bidisemi
+awn.normalize = normalize
+awn.isSubtypeOf = isSubtypeOf
+awn.isExactly = isExactly
+
+awn.intersect = intersect
+awn.negate = negate
+awn.union = union
+
+awn.normalizationToType = normalizationToType
+
+awn.typeToString = typeToString
+awn.simplify = simplify
+
+awn.instantiateGenericsAtCallsite = instantiateGenericsAtCallsite
+awn.reduceTypeFunctions = reduceTypeFunctions
+
+return awn

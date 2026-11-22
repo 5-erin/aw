@@ -2804,10 +2804,13 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         log(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
 
+        local doCheck = true
         local erroneous, ftyToGeneric
         fnTy, erroneous, ftyToGeneric = instantiateGenericsAtCallsite(fnTy, callsiteTy)
 
         if #erroneous > 0 then
+            doCheck = false
+
             for _, free in erroneous do
                 local gen = ftyToGeneric[free]
                 assert(free.Kind == "Free")
@@ -2817,8 +2820,6 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             end
 
             return errorType
-        else
-            awn.check(fnTy, callsiteTy, expr.Position)
         end
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
@@ -2833,13 +2834,56 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             return errorReport(`The top 'function' type is not safe to call.`, expr.Position)
         end
 
+        local failed = {}
+
         if #normFn.functions.components == 1 then
+            if doCheck then
+                awn.check(fnTy, callsiteTy, expr.Position)
+            end
+
             local retTy = normFn.functions.components[1].returns
             return if retTy then normalizationToType(retTy) else nil
+        else
+            for _, component in normFn.functions.components do
+                if #component.parameters ~= #arguments then
+                    table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects { #component.parameters } argument(s).`)
+                    continue
+                end
+
+                local boundsChanges = {}
+                local allOk = true
+
+                for i, param in component.parameters do
+                    local result = isSubtypeOf(normalize(arguments[i]), param)
+
+                    if result.holds then
+                        table.insert(boundsChanges, result.requiredBoundsChanges)
+                    else
+                        table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects argument { i } to be '{ normalizationToString(param) }'.`)
+                        allOk = false
+                    end
+                end
+
+                if allOk then
+                    for _, changes in boundsChanges do
+                        applyBoundsChanges(changes)
+                    end
+
+                    return if component.returns then normalizationToType(component.returns) else nil
+                end
+            end
+        end
+
+        local function overloadResolutionFailed(normError)
+            if #failed > 0 then
+                return errorReport(`Failed to resolve overload.\n* { table.concat(failed, "\n* ") }`, expr.Position)
+            else
+                return errorReport(normError, expr.Position)
+            end
         end
 
         if #arguments ~= 1 then
-            return errorReport(`Cannot perform overload resolution for functions not accepting exactly 1 parameter.`, expr.Position)
+            return overloadResolutionFailed("Internal error: Overload resolution failed but no errors were propagated.")
         end
 
         local normArgs = table.create<<NormalizedType>>(#arguments)
@@ -2870,12 +2914,12 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                     argStrings[i] = typeToString(a)
                 end
 
-                return errorReport(`No overload of '{ typeToString(fnTy) }' accepts arguments '({ table.concat(argStrings, ", ") })'.`, expr.Position)
+                return overloadResolutionFailed(`No overload of '{ typeToString(fnTy) }' accepts arguments '({ table.concat(argStrings, ", ") })'.`, expr.Position)
             end
 
             return normalizationToType(ret)
         else
-            return errorReport(`Cannot resolve overload for non-composite argument '{ normalizationToString(normArgs[1]) }'.`, expr.Position)
+            return overloadResolutionFailed(`Cannot resolve overload for non-composite argument '{ normalizationToString(normArgs[1]) }'.`, expr.Position)
         end
 
     elseif expr.Type == "IfCondition" then -- TODO luau cast?

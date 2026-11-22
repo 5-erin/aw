@@ -388,22 +388,22 @@ local isSubtypeOf
 local isFunctionSubtypeOf
 local isExactly
 
+-- Some types do not support negation with the current normalization implementation (discrete a.k.a. non-top lists and functions).
+-- The "pending" types (generics, type function instances, and free types), however, have no theoretical negation.
+local function hasNonNegatables(n: NormalizedType): boolean
+    return not not (
+        (n.lists and n.lists.items)
+        or (n.functions and n.functions.components)
+        -- TODO luau cast.
+        or (n.pending and next(n.pending :: any) ~= nil)
+    )
+end
+
 local function negate(n: NormalizedType): NormalizedType
     local errors = n.errors
 
-    if n.lists and n.lists.items then
-        print(`Cannot negate discrete list types.`)
-        errors = true
-    end
-
-    if n.functions and n.functions.components then
-        print(`Cannot negate discrete function types.`)
-        errors = true
-    end
-
-    -- TODO luau cast.
-    if n.pending and next(n.pending :: any) ~= nil then
-        print(`Cannot negate pending types (generics, type functions, or free types.)`)
+    if hasNonNegatables(n) then
+        print(`Type has non-negatables, such as discrete (non-top) lists, functions, generics, type functions, or free types.`)
         errors = true
     end
 
@@ -487,7 +487,8 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
         end
     else
         -- One is `never`.
-        strings = a.strings or b.strings
+        strings = if isStringNever(a.strings) then b.strings
+                    else a.strings
     end
 
     local lists = nil
@@ -701,6 +702,8 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
     }
 end
 
+local normalizationToString
+
 local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
     --if seen[ty] then
     --    return normalize_(errorType(), {})
@@ -799,7 +802,7 @@ local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
     }
 
     if ty.Kind == "Negation" then
-        n = negate(n)
+        n = negate(normalize_(ty.Negated, seen))
     elseif ty.Kind == "Union" then
         for _, component in ty.Components do
             n = union(n, normalize_(component, seen))
@@ -967,7 +970,6 @@ local function decomposeToSingletons(n: NormalizedType): { NormalizedType }?
     return singles
 end
 
-local normalizationToString
 local substituteAllIn
 local instantiateGenericsAtCallsite
 
@@ -1322,6 +1324,7 @@ type ToStringOptions = {
     read Alias: string?,
     read HideFreeTypeBounds: boolean?,
     read IsNotMainFreeType: boolean?,
+    read DoNotTryNegating: boolean?,
     Seen: { [Type]: true? }?,
     Recursive: { [Type]: string? }?,
     CurrentlyRecursing: Type?,
@@ -1527,7 +1530,7 @@ local function typeToString_(ty: Type, opts: ToStringOptions): string
     end
 end
 
-function typeToString(ty, tsopts: ToStringOptions?)
+local function typeToString_inner(ty, tsopts: ToStringOptions?)
     toStringRecursiveTypeCount = 0
     local opts: ToStringOptions = tsopts or {}
 
@@ -1556,6 +1559,32 @@ function typeToString(ty, tsopts: ToStringOptions?)
     end
 
     return str
+end
+
+local tryNegationInStringification = true
+
+function typeToString(ty, tsopts: ToStringOptions?)
+    local normalString = typeToString_inner(ty, tsopts)
+
+    if tryNegationInStringification and (not tsopts or not tsopts.DoNotTryNegating) then
+        local norm = normalize(ty)
+        if not hasNonNegatables(norm) then
+            local negated = negate(norm)
+            local negatedString = normalizationToString(negated, { DoNotTryNegating = true })
+
+            if string.find(negatedString, "|") or string.find(negatedString, "&") then
+                negatedString = `~({ negatedString })`
+            else
+                negatedString = "~" .. negatedString
+            end
+
+            if #negatedString < #normalString then
+                return negatedString
+            end
+        end
+    end
+
+    return normalString
 end
 
 function normalizationToType(n: NormalizedType): Type
@@ -1686,8 +1715,8 @@ function normalizedFunctionComponentToFunctionType(nfc: NormalizedFunctionCompon
     )
 end
 
-function normalizationToString(n: NormalizedType): string
-    return typeToString(normalizationToType(n))
+function normalizationToString(n: NormalizedType, opts: { read DoNotTryNegating: boolean? }?): string
+    return typeToString(normalizationToType(n), { DoNotTryNegating = if opts then opts.DoNotTryNegating else false })
 end
 
 -- Maps type names to types.
@@ -2829,13 +2858,12 @@ local function items_TypeFunction(arguments: { read Type }): ReductionResult
     end
 end
 
-local function normalize_TypeFunction(arguments: { read Type }): ReductionResult
+local function simplify_TypeFunction(arguments: { read Type }): ReductionResult
     if #arguments ~= 1 then
         return fail(`Expected exactly 1 type argument, got { #arguments } instead.`)
     end
 
-    local norm = normalize(arguments[1])
-    return ok(normalizationToType(norm))
+    return ok(simplify(arguments[1]))
 end
 
 local typeFunctions: { [string]: TypeFunction? } = {
@@ -2847,9 +2875,9 @@ local typeFunctions: { [string]: TypeFunction? } = {
         canReduceGenerics = false,
         tryReduce = items_TypeFunction,
     },
-    normalize = {
+    simplify = {
         canReduceGenerics = false,
-        tryReduce = normalize_TypeFunction,
+        tryReduce = simplify_TypeFunction,
     },
 }
 

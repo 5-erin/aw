@@ -130,6 +130,7 @@ type NormalizedFunctionType = {
 }
 
 export type NormalizedType = {
+    aliasName: string?,
     read errors:   boolean,
     read nils:     boolean,
     read booleans: NormalizedBooleanType,
@@ -749,11 +750,11 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
     }
 end
 
-local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
-    --if seen[ty] then
-    --    return normalize_(errorType, {})
-    --end
-    seen[ty] = true
+local function normalize_(ty: Type, inside: { [Type]: true? }): NormalizedType
+    if inside[ty] then
+        return normalize_(errorType, {})
+    end
+    inside[ty] = true
 
     local errors = false
     local nils = false
@@ -811,12 +812,12 @@ local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
             error(`Invalid singleton kind '{ typeof(ty.Value) }'.`)
         end
     elseif ty.Kind == "List" then
-        lists = { items = normalize_(ty.Items, seen) }
+        lists = { items = normalize_(ty.Items, inside) }
     elseif ty.Kind == "Function" then
         local params = table.create<<NormalizedType>>(#ty.Parameters)
 
         for i, param in ty.Parameters do
-            params[i] = normalize_(param, seen)
+            params[i] = normalize_(param, inside)
         end
 
         functions = {
@@ -824,8 +825,8 @@ local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
                 {
                     generics = ty.Generics,
                     parameters = params,
-                    variadic = normalize_(ty.Variadic, seen),
-                    returns = if ty.Returns then normalize_(ty.Returns, seen) else nil,
+                    variadic = normalize_(ty.Variadic, inside),
+                    returns = if ty.Returns then normalize_(ty.Returns, inside) else nil,
                 },
             }
         }
@@ -847,18 +848,21 @@ local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
     }
 
     if ty.Kind == "Negation" then
-        n = negate(normalize_(ty.Negated, seen))
+        n = negate(normalize_(ty.Negated, inside))
     elseif ty.Kind == "Union" then
         for _, component in ty.Components do
-            n = union(n, normalize_(component, seen))
+            n = union(n, normalize_(component, inside))
         end
     elseif ty.Kind == "Intersection" then
         n = normalizedUnknown()
 
         for _, component in ty.Components do
-            n = intersect(n, normalize_(component, seen))
+            n = intersect(n, normalize_(component, inside))
         end
     end
+
+    n.aliasName = ty.AliasName
+    inside[ty] = nil
 
     return n
 end
@@ -1780,12 +1784,26 @@ local function normalizationToType(n: NormalizedType): Type
     end
 
     if #t == 0 then
-        return neverType
+        local ty = table.clone(neverType)
+        ty.AliasName = n.aliasName
+
+        return ty
+
     elseif #t == 1 then
-        return t[1]
+        local ty = t[1]
+
+        if ty.Kind ~= "Primitive" and ty.Kind ~= "never" and ty.Kind ~= "unknown" and ty.Kind ~= "Generic" and ty.Kind ~= "Free" then
+            ty = table.clone(ty)
+            ty.AliasName = n.aliasName
+        end
+
+        return ty
     end
 
-    return unionType(t)
+    local ty = table.clone(unionType(t))
+    ty.AliasName = n.aliasName
+
+    return ty
 end
 
 -- Maps type names to types.
@@ -2254,9 +2272,11 @@ end
 
 local function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnotation): Type
     if annotation.Kind == "Error" then
-        return errorType
+        return table.clone(errorType) -- For alias names.
+
     elseif annotation.Kind == "Unit" then
         return errorReport(`'()' is only valid as a function return type annotation.`, position)
+
     elseif annotation.Kind == "Reference" then
         local ty = typeEnv[annotation.Reference]
 
@@ -2264,7 +2284,7 @@ local function typeAnnotationToType(position: caw.Position, annotation: caw.Type
             if typeEnvGenericParameters[ty] then
                 return errorReport(`'{ annotation.Reference }' requires type arguments.`, position)
             else
-                return ty
+                return table.clone(ty) -- For alias names.
             end
         else
             return errorReport(`Unknown type '{ annotation.Reference }'`, position)

@@ -1012,7 +1012,7 @@ local function intersectApplicableReturns(components: { read NormalizedFunctionC
         return nil
     end
 
-    local returned: NormalizedType = applicable[1]
+    local returned = applicable[1]
 
     for i = 2, #applicable do
         returned = intersect(returned, applicable[i])
@@ -2828,19 +2828,35 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             normArgs[i] = normalize(a)
         end
 
-        local normReturn = intersectApplicableReturns(normFn.functions.components, normArgs[1])
+        local singles = decomposeToSingletons(normArgs[1])
 
-        if not normReturn then
-            local argStrings = table.create<<string>>(#arguments)
+        if singles then
+            local ret = normalizedNever()
+            local anySucceeded = false
 
-            for i, a in arguments do
-                argStrings[i] = typeToString(a)
+            for _, single in singles do
+                local thisRet = intersectApplicableReturns(normFn.functions.components, single)
+
+                if thisRet then
+                    ret = union(ret, thisRet)
+                    anySucceeded = true
+                end
             end
 
-            return errorReport(`No overload of '{ typeToString(fnTy) }' accepts parameters '({ table.concat(argStrings, ", ") })'`, expr.Position)
-        end
+            if not anySucceeded then
+                local argStrings = table.create<<string>>(#arguments)
 
-        return normalizationToType(normReturn)
+                for i, a in arguments do
+                    argStrings[i] = typeToString(a)
+                end
+
+                return errorReport(`No overload of '{ typeToString(fnTy) }' accepts arguments '({ table.concat(argStrings, ", ") })'.`, expr.Position)
+            end
+
+            return normalizationToType(ret)
+        else
+            return errorReport(`Cannot resolve overload for non-composite argument '{ normalizationToString(normArgs[1]) }'.`, expr.Position)
+        end
 
     elseif expr.Type == "IfCondition" then -- TODO luau cast?
         infer(state, expr.Condition, unknownType)

@@ -160,35 +160,36 @@ local function makeType(ty: TypeData): Type
     return t
 end
 
-local function errorType()
+local errorType = makeType{ Kind = "error" }
+local neverType = makeType{ Kind = "never" }
+local unknownType = makeType{ Kind = "unknown" }
+local nilType = makeType{ Kind = "Primitive", Primitive = "nil" }
+local booleanType = makeType{ Kind = "Primitive", Primitive = "boolean" }
+local numberType = makeType{ Kind = "Primitive", Primitive = "number" }
+local stringType = makeType{ Kind = "Primitive", Primitive = "string" }
+local topListType = makeType{ Kind = "Primitive", Primitive = "list" }
+local topFunctionType = makeType{ Kind = "Primitive", Primitive = "function" }
+
+local function freeType(upper: Type?, lower: Type?)
     return makeType{
-        Kind = "error",
+        Kind = "Free",
+        UpperBound = upper or unknownType,
+        LowerBound = lower or neverType,
     }
 end
 
-local function neverType()
+local function genericType(name: string?)
     return makeType{
-        Kind = "never",
+        Kind = "Generic",
+        Name = name,
     }
 end
 
-local function unknownType()
+local function pendingExpansionType(name: string, arguments: { read Type })
     return makeType{
-        Kind = "unknown",
-    }
-end
-
-local function primitiveType(primitive: index<PrimitiveType, "Primitive">)
-    return makeType{
-        Kind = "Primitive",
-        Primitive = primitive,
-    }
-end
-
-local function listType(items: Type)
-    return makeType{
-        Kind = "List",
-        Items = items,
+        Kind = "PendingExpansion",
+        Name = name,
+        Arguments = arguments,
     }
 end
 
@@ -199,10 +200,10 @@ local function singletonType(value)
     }
 end
 
-local function genericType(name: string?)
+local function listType(items: Type)
     return makeType{
-        Kind = "Generic",
-        Name = name,
+        Kind = "List",
+        Items = items,
     }
 end
 
@@ -216,11 +217,10 @@ local function functionType(generics: { read Type }, parameters: { read Type }, 
     }
 end
 
-local function pendingExpansionType(name: string, arguments: { read Type })
+local function negationType(negated: Type)
     return makeType{
-        Kind = "PendingExpansion",
-        Name = name,
-        Arguments = arguments,
+        Kind = "Negation",
+        Negated = negated,
     }
 end
 
@@ -238,17 +238,9 @@ local function intersectionType(components: { read Type })
     }
 end
 
-local function freeType(upper: Type?, lower: Type?)
-    return makeType{
-        Kind = "Free",
-        UpperBound = upper or unknownType(),
-        LowerBound = lower or neverType(),
-    }
-end
-
 local function errorReport(message, position: caw.Position): Type
     print(`{ position.Line }:{ position.Column }: { message }`)
-    return errorType()
+    return errorType
 end
 
 local function makeUnion(a: Type, b: Type)
@@ -708,7 +700,7 @@ end
 
 local function normalize_(ty: Type, seen: { [Type]: true }): NormalizedType
     --if seen[ty] then
-    --    return normalize_(errorType(), {})
+    --    return normalize_(errorType, {})
     --end
     seen[ty] = true
 
@@ -875,15 +867,15 @@ local function subtypeFailure(surpressed: boolean, failed: string, variance: Sub
 end
 
 local function normalizedNil()
-    return normalize(primitiveType("nil"))
+    return normalize(nilType)
 end
 
 local function normalizedBoolean(singleton: boolean?)
-    return normalize(if singleton == nil then primitiveType("nil") else singletonType(singleton))
+    return normalize(if singleton == nil then nilType else singletonType(singleton))
 end
 
 local function normalizedString(singleton: string?)
-    return normalize(if singleton == nil then primitiveType("string") else singletonType(singleton))
+    return normalize(if singleton == nil then stringType else singletonType(singleton))
 end
 
 local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Type }
@@ -1583,18 +1575,18 @@ local function normalizationToType(n: NormalizedType): Type
     local t: { Type } = {}
 
     if n.errors then
-        table.insert(t, errorType())
+        table.insert(t, errorType)
     end
 
     if isUnknown(n) then
-        table.insert(t, unknownType())
+        table.insert(t, unknownType)
     else
         if n.nils then
-            table.insert(t, primitiveType("nil"))
+            table.insert(t, nilType)
         end
 
         if n.booleans.hasTrue and n.booleans.hasFalse then
-            table.insert(t, primitiveType("boolean"))
+            table.insert(t, booleanType)
         elseif n.booleans.hasTrue then
             table.insert(t, singletonType(true))
         elseif n.booleans.hasFalse then
@@ -1602,26 +1594,26 @@ local function normalizationToType(n: NormalizedType): Type
         end
 
         if n.numbers then
-            table.insert(t, primitiveType("number"))
+            table.insert(t, numberType)
         end
 
         if isStringTop(n.strings) then
-            table.insert(t, primitiveType("string"))
+            table.insert(t, stringType)
         elseif not isStringNever(n.strings) then
-            local strs = {}
+            local strs: { Type } = {}
 
             for s, _ in n.strings.singletons do
                 local sty = singletonType(s)
 
                 if n.strings.cofinite then
-                    table.insert(strs, makeType{ Kind = "Negation", Negated = sty })
+                    table.insert(strs, negationType(sty))
                 else
                     table.insert(strs, sty)
                 end
             end
 
             if n.strings.cofinite then
-                table.insert(strs, 1, primitiveType("string"))
+                table.insert(strs, 1, stringType)
                 table.insert(t, intersectionType(strs))
             else
                 if #strs == 1 then
@@ -1636,7 +1628,7 @@ local function normalizationToType(n: NormalizedType): Type
             if n.lists.items then
                 table.insert(t, listType(normalizationToType(n.lists.items)))
             else
-                table.insert(t, primitiveType("list"))
+                table.insert(t, topListType)
             end
         end
 
@@ -1660,7 +1652,7 @@ local function normalizationToType(n: NormalizedType): Type
                     table.insert(t, intersectionType(cs))
                 end
             else
-                table.insert(t, primitiveType("function"))
+                table.insert(t, topFunctionType)
             end
         end
 
@@ -1684,7 +1676,7 @@ local function normalizationToType(n: NormalizedType): Type
     end
 
     if #t == 0 then
-        return neverType()
+        return neverType
     elseif #t == 1 then
         return t[1]
     end
@@ -1713,24 +1705,24 @@ end
 
 -- Maps type names to types.
 typeEnv = {
-    never = neverType(),
-    unknown = unknownType(),
-    ["nil"] = primitiveType("nil"),
-    boolean = primitiveType("boolean"),
-    number = primitiveType("number"),
-    string = primitiveType("string"),
+    never = neverType,
+    unknown = unknownType,
+    ["nil"] = nilType,
+    boolean = booleanType,
+    number = numberType,
+    string = stringType,
 }
 -- Maps declaration names to types.
 local typeAssociations: { [string]: { Expression: caw.Expression?, Type: Type }? } = {
     valuenever = {
-        Type = neverType()
+        Type = neverType
     },
 
     print = {
-        Type = functionType({}, { unknownType() }, unknownType()),
+        Type = functionType({}, { unknownType }, unknownType),
     },
     tostring = {
-        Type = functionType({}, { unknownType() }, neverType(), primitiveType("string")),
+        Type = functionType({}, { unknownType }, neverType, stringType),
     }
 }
 -- The generics that a type alias is parameterized over.
@@ -1809,10 +1801,7 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
         return functionType(ty.Generics, params, substituteAllIn(ty.Variadic, substitutions, traversed), rets)
 
     elseif ty.Kind == "Negation" then
-        return makeType{
-            Kind = "Negation",
-            Negated = substituteAllIn(ty.Negated, substitutions, traversed),
-        }
+        return negationType(substituteAllIn_(ty.Negated, substitutions, traversed))
 
     elseif ty.Kind == "Union" then
         local components = table.create<<Type>>(#ty.Components)
@@ -1929,7 +1918,7 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
                 local nameCorrected = string.upper(string.sub(name, 1, 1)) .. string.sub(name, 2, #name)
                 errorReport(`{ nameCorrected } has been reduced to never, this function is not callable with any value.`, state.Expression.Position)
 
-                state.Substitutions[ty] = neverType()
+                state.Substitutions[ty] = neverType
             end
         else
             local sub = if state.Polarity == "Positive" then ty.LowerBound else ty.UpperBound
@@ -2073,14 +2062,14 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         if expr.Constant.Type == "boolean" or expr.Constant.Type == "string" then
             return singletonType(expr.Constant.Value)
         else
-            return primitiveType(expr.Constant.Type)
+            return makeType{ Kind = "Primitive", Primitive = expr.Constant.Type }
         end
 
     elseif expr.Type == "Declaration" then
         local anno = if expr.Declaration.Annotation then typeAnnotationToType(expr.Position, expr.Declaration.Annotation) else nil
         local expect = anno or freeType()
 
-        local ty = if expr.Declaration.Value then infer(state, expr.Declaration.Value, expect) else primitiveType("nil")
+        local ty = if expr.Declaration.Value then infer(state, expr.Declaration.Value, expect) else nilType
 
         if not ty then
             errorReport(`Trying to assign '{ expr.Declaration.Name }' to an expression returning no values.`, expr.Position)
@@ -2089,7 +2078,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         -- TODO luau type error on `ty` when `anno or` is removed
         typeAssociations[expr.Declaration.Name] = {
             Expression = expr,
-            Type = anno or ty or errorType()
+            Type = anno or ty or errorType
         }
         table.insert(typeAssociationsOrdered, expr.Declaration.Name)
 
@@ -2125,10 +2114,10 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local itemsTy = freeType()
 
         local listTy = infer(state, expr.List, listType(itemsTy)) or errorReport(`Tried to index an expression that returned no value.`, expr.List.Position)
-        local indexTy = infer(state, expr.Index, primitiveType("number")) or errorReport(`Index was an expression that returned no value.`, expr.Index.Position)
+        local indexTy = infer(state, expr.Index, numberType) or errorReport(`Index was an expression that returned no value.`, expr.Index.Position)
 
         constrainSubtype(state, expr.List.Position, listTy, listType(itemsTy))
-        constrainSubtype(state, expr.Index.Position, indexTy, primitiveType("number"))
+        constrainSubtype(state, expr.Index.Position, indexTy, numberType)
 
         return itemsTy
 
@@ -2136,10 +2125,10 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local itemsTy = expected or freeType()
 
         local listTy = infer(state, expr.List, listType(itemsTy)) or errorReport(`Tried to index an expression that returned no value.`, expr.List.Position)
-        local indexTy = infer(state, expr.Index, primitiveType("number")) or errorReport(`Index was an expression that returned no value.`, expr.Index.Position)
+        local indexTy = infer(state, expr.Index, numberType) or errorReport(`Index was an expression that returned no value.`, expr.Index.Position)
 
         constrainSubtype(state, expr.List.Position, listTy, listType(itemsTy))
-        constrainSubtype(state, expr.Index.Position, indexTy, primitiveType("number"))
+        constrainSubtype(state, expr.Index.Position, indexTy, numberType)
 
         local valueTy = infer(state, expr.Value, itemsTy)
 
@@ -2152,24 +2141,24 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
     elseif expr.Type == "UnaryOperation" then
         if expr.Operator == "-" then
-            local operand = infer(state, expr.Operand, primitiveType("number"))
+            local operand = infer(state, expr.Operand, numberType)
 
             if not operand then
                 return errorReport(`Attempted to use '-' on expression that returns no value.`, expr.Operand.Position)
             end
 
-            constrainSubtype(state, expr.Operand.Position, operand, primitiveType("number"))
-            return primitiveType("number")
+            constrainSubtype(state, expr.Operand.Position, operand, numberType)
+            return numberType
 
         elseif expr.Operator == "#" then
-            local operand = infer(state, expr.Operand, unionType({ primitiveType("string"), primitiveType("list") }))
+            local operand = infer(state, expr.Operand, unionType({ stringType, topListType }))
 
             if not operand then
                 return errorReport(`Attempted to use '#' on expression that returns no value.`, expr.Operand.Position)
             end
 
-            constrainSubtype(state, expr.Operand.Position, operand, unionType({ primitiveType("string"), primitiveType("list") }))
-            return primitiveType("number")
+            constrainSubtype(state, expr.Operand.Position, operand, unionType({ stringType, topListType }))
+            return numberType
         else
             unreachable(expr.Operator)
             error(`Unreachable.`)
@@ -2228,8 +2217,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         elseif expr.Operator == "+" or expr.Operator == "-" or expr.Operator == "*"
             or expr.Operator == "/" or expr.Operator == "//"
         then
-            local leftTy = infer(state, expr.Left, primitiveType("number"))
-            local rightTy = infer(state, expr.Right, primitiveType("number"))
+            local leftTy = infer(state, expr.Left, numberType)
+            local rightTy = infer(state, expr.Right, numberType)
 
             if not leftTy then
                 return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
@@ -2239,14 +2228,14 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
-            constrainSubtype(state, expr.Left.Position, leftTy, primitiveType("number"))
-            constrainSubtype(state, expr.Right.Position, rightTy, primitiveType("number"))
+            constrainSubtype(state, expr.Left.Position, leftTy, numberType)
+            constrainSubtype(state, expr.Right.Position, rightTy, numberType)
 
-            return primitiveType("number")
+            return numberType
 
         elseif expr.Operator == ".." then
-            local leftTy = infer(state, expr.Left, primitiveType("string"))
-            local rightTy = infer(state, expr.Right, primitiveType("string"))
+            local leftTy = infer(state, expr.Left, numberType)
+            local rightTy = infer(state, expr.Right, numberType)
 
             if not leftTy then
                 return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
@@ -2256,16 +2245,16 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
-            constrainSubtype(state, expr.Left.Position, leftTy, primitiveType("string"))
-            constrainSubtype(state, expr.Right.Position, rightTy, primitiveType("string"))
+            constrainSubtype(state, expr.Left.Position, leftTy, stringType)
+            constrainSubtype(state, expr.Right.Position, rightTy, stringType)
 
-            return primitiveType("string")
+            return stringType
 
         elseif expr.Operator == "<" or expr.Operator == "<=" or expr.Operator == ">"
             or expr.Operator == ">="
         then
-            local leftTy = infer(state, expr.Left, primitiveType("number"))
-            local rightTy = infer(state, expr.Right, primitiveType("number"))
+            local leftTy = infer(state, expr.Left, numberType)
+            local rightTy = infer(state, expr.Right, numberType)
 
             if not leftTy then
                 return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
@@ -2275,21 +2264,21 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                 return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
-            constrainSubtype(state, expr.Left.Position, leftTy, primitiveType("number"))
-            constrainSubtype(state, expr.Right.Position, rightTy, primitiveType("number"))
+            constrainSubtype(state, expr.Left.Position, leftTy, numberType)
+            constrainSubtype(state, expr.Right.Position, rightTy, numberType)
 
-            return primitiveType("boolean")
+            return booleanType
 
         elseif expr.Operator == "==" or expr.Operator == "~=" then
-            if not infer(state, expr.Left, unknownType()) then
+            if not infer(state, expr.Left, unknownType) then
                 return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
             end
 
-            if not infer(state, expr.Right, unknownType()) then
+            if not infer(state, expr.Right, unknownType) then
                 return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
-            return primitiveType("boolean")
+            return booleanType
         else
             unreachable(expr.Operator)
             error(`Cannot infer '{ expr.Operator }' operations.`)
@@ -2320,7 +2309,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         if expr.Function.Name then
             typeAssociations[expr.Function.Name] = {
-                Type = functionType({}, params, neverType(), freeType()),
+                Type = functionType({}, params, neverType, freeType()),
                 Expression = expr,
             }
 
@@ -2370,7 +2359,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             AlwaysConcretize = false,
         }
 
-        log(`{ expr.Position.Line }:{ expr.Position.Column }: Eliminating free types: { typeToString(functionType(gens, params, varTy or neverType(), if typeof(retTy) == "table" then retTy else nil)) }`)
+        log(`{ expr.Position.Line }:{ expr.Position.Column }: Eliminating free types: { typeToString(functionType(gens, params, varTy or neverType, if typeof(retTy) == "table" then retTy else nil)) }`)
 
         -- Inputs are negative.
         freeTypeSubstitutions.Polarity = "Negative"
@@ -2413,7 +2402,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         if varTy then
             varTy = substituteAllIn(varTy, freeTypeSubstitutions.Substitutions, traversed)
         else
-            varTy = neverType()
+            varTy = neverType
         end
 
         if typeof(retTy) == "table" then
@@ -2453,7 +2442,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
             if inferred then
                 state.ReturnType = freeType(
-                    unknownType(),
+                    unknownType,
                     inferred
                 )
             else
@@ -2504,7 +2493,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             arguments[i] = infer(state, a, expect)
         end
 
-        local callsiteTy = functionType({}, arguments, neverType(), expected)
+        local callsiteTy = functionType({}, arguments, neverType, expected)
 
         log(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
         fnTy = instantiateGenericsAtCallsite(fnTy, callsiteTy)
@@ -2512,7 +2501,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
 
-        if not normFn.functions or not isSubtypeOf(normFn, normalize(primitiveType("function"))).holds then
+        if not normFn.functions or not isSubtypeOf(normFn, normalize(topFunctionType)).holds then
             return errorReport(`'{ normalizationToString(normFn) }' is not callable.`, expr.Position)
         end
 
@@ -2552,7 +2541,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         return normalizationToType(normReturn)
 
     elseif expr.Type == "IfCondition" then -- TODO luau cast?
-        infer(state, expr.Condition, unknownType())
+        infer(state, expr.Condition, unknownType)
 
         local result = nil
 
@@ -2593,7 +2582,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
     elseif expr.Type == "VariadicLength" then
         if state.Variadic then
-            return primitiveType("number")
+            return numberType
         else
             return errorReport(`Function does not have a variadic.`, expr.Position)
         end
@@ -2631,9 +2620,9 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         typeEnv[expr.Name] = ty
         table.insert(typeEnvOrdered, expr.Name)
 
-        return errorType()
+        return errorType
     elseif expr.Type == "InvalidSyntax" then
-        return errorType()
+        return errorType
     else
         unreachable(expr.Type)
         error(`Unreachable.`)
@@ -2642,7 +2631,7 @@ end
 
 local function typeAnnotationToType_(position: caw.Position, annotation: caw.TypeAnnotation): Type
     if annotation.Kind == "Error" then
-        return errorType()
+        return errorType
     elseif annotation.Kind == "Unit" then
         return errorReport(`'()' is only valid as a function return type annotation.`, position)
     elseif annotation.Kind == "Reference" then
@@ -2682,7 +2671,7 @@ local function typeAnnotationToType_(position: caw.Position, annotation: caw.Typ
             params[i] = typeAnnotationToType_(position, param)
         end
 
-        return functionType(gens, params, neverType(), if annotation.Returns then typeAnnotationToType_(position, annotation.Returns) else nil)
+        return functionType(gens, params, neverType, if annotation.Returns then typeAnnotationToType_(position, annotation.Returns) else nil)
 
     elseif annotation.Kind == "AliasInstantiation" then
         local arguments = table.create<<Type>>(#annotation.Arguments)
@@ -2694,10 +2683,7 @@ local function typeAnnotationToType_(position: caw.Position, annotation: caw.Typ
         return pendingExpansionType(annotation.Name, arguments)
 
     elseif annotation.Kind == "Negation" then
-        return makeType{
-            Kind = "Negation",
-            Negated = typeAnnotationToType_(position, annotation.Negated),
-        }
+        return negationType(typeAnnotationToType_(position, annotation.Negated))
 
     elseif annotation.Kind == "Union" then
         local components = table.create<<Type>>(#annotation.Components)
@@ -2836,14 +2822,14 @@ local function items_TypeFunction(arguments: { read Type }): ReductionResult
 
     local norm = normalize(arguments[1])
 
-    if not isSubtypeOf(norm, normalize(primitiveType("list"))).holds then
+    if not isSubtypeOf(norm, normalize(topListType)).holds then
         return fail(`Expected list type, got '{ typeToString(arguments[1]) }'.`)
     end
 
     if norm.lists and norm.lists.items then
         return ok(normalizationToType(norm.lists.items))
     else
-        return ok(neverType())
+        return ok(neverType)
     end
 end
 
@@ -2933,10 +2919,7 @@ local function reduceTypeFunctions(ty: Type): Type
             inited = errorReport(`Invalid type function '{ ty.Name }'.`, { Line = 1, Column = 1, Offset = 1 })
         end
     elseif ty.Kind == "Negation" then
-        inited = makeType{
-            Kind = "Negation",
-            Negated = reduceTypeFunctions(ty.Negated),
-        }
+        inited = negationType(reduceTypeFunctions(ty.Negated))
 
     elseif ty.Kind == "Union" then
         local components = table.create<<Type>>(#ty.Components)
@@ -3079,5 +3062,27 @@ awn.simplify = simplify
 
 awn.instantiateGenericsAtCallsite = instantiateGenericsAtCallsite
 awn.reduceTypeFunctions = reduceTypeFunctions
+
+awn.makeType = makeType
+
+awn.errorType = errorType
+awn.neverType = neverType
+awn.unknownType = unknownType
+awn.nilType = nilType
+awn.booleanType = booleanType
+awn.numberType = numberType
+awn.stringType = stringType
+awn.topListType = topListType
+awn.topFunctionType = topFunctionType
+
+awn.freeType = freeType
+awn.genericType = genericType
+awn.pendingExpansionType = pendingExpansionType
+awn.singletonType = singletonType
+awn.listType = listType
+awn.functionType = functionType
+awn.negationType = negationType
+awn.unionType = unionType
+awn.intersectionType = intersectionType
 
 return awn

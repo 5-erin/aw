@@ -1,4 +1,5 @@
 -- aw.luau - @5-erin, 03/09/2026
+local runTests = require("./staw")
 local caw = require("./caw")
 
 local hmProgram = [[
@@ -86,7 +87,7 @@ let b_lowerbounds = function(bx)
 end
 
 let b_bounds2 = function(by)
-    by(1)
+    by(-1)
     by(true)
     let bz: string = by(nil)
 end
@@ -248,6 +249,7 @@ Arguments:
     --log-inference  - Enable logging for the inference algorithm.
     --inference <A>  - Select the inference algorithm: "hm".
     --ast            - Dump the generated AST of the program.
+    --test           - Run tests.
     --help           - Show this help message and exit.
 ]]
 
@@ -313,6 +315,10 @@ if select("#", ...) > 0 then
             end
         elseif arg == "--ast" then
             printAst = true
+        elseif arg == "--test" then
+            runTests()
+
+            return true
         elseif arg == "--help" then
             print(helpText)
 

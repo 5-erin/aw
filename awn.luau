@@ -369,22 +369,6 @@ local function isUnknown(n: NormalizedType)
     )
 end
 
--- TODO luau any
-local function deepCopy(tab: any): any
-    assert(typeof(tab) == "table")
-    local t = table.clone(tab)
-
-    for k, v in t do -- TODO luau, `intersect<>` should always reduce methinks? only occurs when function signature is `local function deepCopy<T>(tab: T & {}): T`
-        if typeof(v) == "table" and v.Kind ~= "Generic" then
-            t[k] = deepCopy(v)
-        else
-            t[k] = v
-        end
-    end
-
-    return t
-end
-
 -- Some types do not support negation with the current normalization implementation (discrete a.k.a. non-top lists and functions).
 -- The "pending" types (generics, type function instances, and free types), however, have no theoretical negation.
 local function hasNonNegatables(n: NormalizedType): boolean

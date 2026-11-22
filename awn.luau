@@ -515,11 +515,47 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
     local functions = nil
 
     if a.functions and b.functions then
-        if a.functions.components and b.functions.components then
-            -- TODO.
-            print(`Cannot union discrete function types.`)
-            functions = {}
-            errors = true
+        local aComponents = a.functions.components
+        local bComponents = b.functions.components
+
+        if aComponents and bComponents then
+            local components = table.create<<NormalizedFunctionComponentType>>(#aComponents + #bComponents)
+            -- TODO luau cast.
+            table.move(aComponents :: any, 1, #aComponents, 1, components)
+
+            for _, bComponent in bComponents do
+                local bf = { components = { bComponent } }
+                local redundant = false
+                local failed = false
+
+                for i, component in components do
+                    local af = { components = { component } }
+
+                    -- If `A <: B`, then `A | B = B`.
+                    if awn.isFunctionSubtypeOf(bf, af).holds then
+                        redundant = true
+                        break
+                    elseif awn.isFunctionSubtypeOf(af, bf).holds then
+                        components[i] = bComponent
+                        redundant = true
+                        break
+                    else
+                        print(`Cannot union unrelated discrete function types.`)
+                        failed = true
+                        errors = true
+                    end
+                end
+
+                if failed then
+                    break
+                end
+
+                if not redundant then
+                    table.insert(components, bComponent)
+                end
+            end
+
+            functions = { components = components }
         else
             -- Top.
             functions = {}
@@ -650,10 +686,25 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
             table.move(aComponents :: any, 1, #aComponents, 1, components)
 
             for _, bComponent in bComponents do
-                for i, aComponent in components do
-                    if awn.isFunctionSubtypeOf(bComponent, aComponent).holds then
+                local bf = { components = { bComponent } }
+                local redundant = false
+
+                for i, component in components do
+                    local af = { components = { component } }
+
+                    -- If `A <: B`, then `A & B = A`.
+                    if awn.isFunctionSubtypeOf(bf, af).holds then
                         components[i] = bComponent
+                        redundant = true
+                        break
+                    elseif awn.isFunctionSubtypeOf(af, bf).holds then
+                        redundant = true
+                        break
                     end
+                end
+
+                if not redundant then
+                    table.insert(components, bComponent)
                 end
             end
 
@@ -947,7 +998,7 @@ local function intersectApplicableReturns(components: { read NormalizedFunctionC
     local applicable = {}
 
     for _, c in components do
-        if #c.parameters == 1 then
+        if #c.parameters == 1 and c.returns then
             local result = awn.isSubtypeOf(argument, c.parameters[1])
 
             if result.holds then
@@ -961,10 +1012,10 @@ local function intersectApplicableReturns(components: { read NormalizedFunctionC
         return nil
     end
 
-    local returned: NormalizedType = deepCopy(applicable[1])
+    local returned: NormalizedType = applicable[1]
 
     for i = 2, #applicable do
-        intersect(returned, applicable[i])
+        returned = intersect(returned, applicable[i])
     end
 
     return returned
@@ -1952,7 +2003,7 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
                         -- TODO add explanatory snippet for this branch...
                         log(`{ typeToString(ty, { HideFreeTypeBounds = true }) } upper bound '{ typeToString(upper) }' will be clipped for intersection with '{ typeToString(previous) }'`)
 
-                        intersect(normUpper, normalize(previous))
+                        normUpper = intersect(normUpper, normalize(previous))
                         replacement = normalizationToType(normUpper)
                     end
                 else
@@ -2457,8 +2508,8 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             return numberType
 
         elseif expr.Operator == ".." then
-            local leftTy = infer(state, expr.Left, numberType)
-            local rightTy = infer(state, expr.Right, numberType)
+            local leftTy = infer(state, expr.Left, stringType)
+            local rightTy = infer(state, expr.Right, stringType)
 
             if not leftTy then
                 return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
@@ -3207,7 +3258,7 @@ function awn.run(expressions: { read caw.Expression }, options: { read LogInfere
                 gensString = `<{ table.concat(gensStr, ", ") }>`
             end
 
-            print(`type { k }{ gensString } = { typeToString(simplify(reduceTypeFunctions(a), { Alias = k })) }`)
+            print(`type { k }{ gensString } = { typeToString(simplify(reduceTypeFunctions(a)), { Alias = k }) }`)
         end
     end
 end

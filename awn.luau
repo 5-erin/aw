@@ -494,7 +494,7 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
         local bItems = b.lists.items
 
         if aItems and bItems then
-            local result = isExactly(aItems, bItems)
+            local result = awn.isExactly(aItems, bItems)
 
             if result.holds then
                 lists = { items = aItems }
@@ -624,7 +624,7 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
         local bItems = b.lists.items
 
         if aItems and bItems then
-            local result = isExactly(aItems, bItems)
+            local result = awn.isExactly(aItems, bItems)
 
             if result.holds then
                 lists = { items = aItems }
@@ -651,7 +651,7 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
 
             for _, bComponent in bComponents do
                 for i, aComponent in components do
-                    if isFunctionSubtypeOf(bComponent, aComponent).holds then
+                    if awn.isFunctionSubtypeOf(bComponent, aComponent).holds then
                         components[i] = bComponent
                     end
                 end
@@ -891,7 +891,7 @@ local function applyBoundsChanges(changes: { read RequiredBoundsChange }): { Typ
             change.Target.LowerBound = makeUnion(change.Target.LowerBound, change.UnionLowerWith)
         end
 
-        local consistencyResult = isSubtypeOf(normalize(change.Target.LowerBound), normalize(change.Target.UpperBound))
+        local consistencyResult = awn.isSubtypeOf(normalize(change.Target.LowerBound), normalize(change.Target.UpperBound))
 
         if not consistencyResult.holds then
             log(`Free type bounds mismatch for '{ awn.typeToString(change.Target) }': { consistencyResult.failedPath }`)
@@ -912,7 +912,7 @@ local function intersectApplicableReturns(components: { read NormalizedFunctionC
 
     for _, c in components do
         if #c.parameters == 1 then
-            local result = isSubtypeOf(argument, c.parameters[1])
+            local result = awn.isSubtypeOf(argument, c.parameters[1])
 
             if result.holds then
                 applyBoundsChanges(result.requiredBoundsChanges)
@@ -960,6 +960,10 @@ local function decomposeToSingletons(n: NormalizedType): { NormalizedType }?
     return singles
 end
 
+local function normalizationToString(n: NormalizedType, opts: { read DoNotTryNegating: boolean? }?): string
+    return awn.typeToString(awn.normalizationToType(n), { DoNotTryNegating = if opts then opts.DoNotTryNegating else false })
+end
+
 local function normalizedFunctionComponentToString(nfc: NormalizedFunctionComponentType): string
     local gensStrings = table.create<<string>>(#nfc.generics)
     local paramStrings = table.create<<string>>(#nfc.parameters)
@@ -981,7 +985,22 @@ local function normalizedFunctionComponentToString(nfc: NormalizedFunctionCompon
     return str
 end
 
-function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionType): SubtypingResult
+local function normalizedFunctionComponentToFunctionType(nfc: NormalizedFunctionComponentType): Type
+    local parameters = table.create<<Type>>(#nfc.parameters)
+
+    for i, param in nfc.parameters do
+        parameters[i] = awn.normalizationToType(param)
+    end
+
+    return functionType(
+        nfc.generics,
+        parameters,
+        awn.normalizationToType(nfc.variadic),
+        if nfc.returns then awn.normalizationToType(nfc.returns) else nil
+    )
+end
+
+function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionType): SubtypingResult
     -- `((A) -> B) & ((C) -> D) & ... <: function`
     if not b.components then
         return subtypeSuccess()
@@ -1010,7 +1029,7 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                 end
 
                 if cb.returns then
-                    local result = isSubtypeOf(car, cb.returns)
+                    local result = awn.isSubtypeOf(car, cb.returns)
 
                     if result.holds then
                         -- TODO luau cast.
@@ -1065,7 +1084,7 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                 end
 
                 for i, param in ca.parameters do
-                    local paramResult = isSupertypeOf(param, cb.parameters[i])
+                    local paramResult = awn.isSupertypeOf(param, cb.parameters[i])
 
                     if paramResult.holds then
                         -- TODO luau cast.
@@ -1086,7 +1105,7 @@ function isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctionTyp
                 end
 
                 if ca.returns and cb.returns then
-                    local returnResult = isSubtypeOf(ca.returns, cb.returns)
+                    local returnResult = awn.isSubtypeOf(ca.returns, cb.returns)
 
                     if returnResult.holds then
                         -- TODO luau cast.
@@ -1145,7 +1164,7 @@ local function freeTypesOf(n: NormalizedType): { Type }?
     end
 end
 
-function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
+local function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
     -- `unknown` is not a useful narrowing of an upper bound.
     if isUnknown(b) then
         return subtypeSuccess()
@@ -1237,7 +1256,7 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         local aItems = a.lists.items
         local bItems = b.lists.items
 
-        local result = isExactly(aItems, bItems)
+        local result = awn.isExactly(aItems, bItems)
 
         if not result.holds then
             return result
@@ -1250,7 +1269,7 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
         return subtypeFailure(surpressed, "Unexpected function.")
     -- `function </: ((A) -> B) & ((C) -> D) & ...`
     elseif a.functions and b.functions then
-        local result = isFunctionSubtypeOf(a.functions, b.functions)
+        local result = awn.isFunctionSubtypeOf(a.functions, b.functions)
 
         if result.holds then
             table.move(result.requiredBoundsChanges, 1, #result.requiredBoundsChanges, #requiredChanges + 1, requiredChanges)
@@ -1274,14 +1293,14 @@ function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
     return subtypeSuccess(requiredChanges)
 end
 
-function isSupertypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
+local function isSupertypeOf(a: NormalizedType, b: NormalizedType): SubtypingResult
     local result = isSubtypeOf(b, a)
     -- result.Variance = "Contravariant"
 
     return result
 end
 
-function isExactly(a: NormalizedType, b: NormalizedType): SubtypingResult
+local function isExactly(a: NormalizedType, b: NormalizedType): SubtypingResult
     local r1 = isSubtypeOf(a, b)
 
     if not r1.holds then
@@ -1684,25 +1703,6 @@ local function normalizationToType(n: NormalizedType): Type
     return unionType(t)
 end
 
-function normalizedFunctionComponentToFunctionType(nfc: NormalizedFunctionComponentType): Type
-    local parameters = table.create<<Type>>(#nfc.parameters)
-
-    for i, param in nfc.parameters do
-        parameters[i] = normalizationToType(param)
-    end
-
-    return functionType(
-        nfc.generics,
-        parameters,
-        normalizationToType(nfc.variadic),
-        if nfc.returns then normalizationToType(nfc.returns) else nil
-    )
-end
-
-function normalizationToString(n: NormalizedType, opts: { read DoNotTryNegating: boolean? }?): string
-    return typeToString(normalizationToType(n), { DoNotTryNegating = if opts then opts.DoNotTryNegating else false })
-end
-
 -- Maps type names to types.
 typeEnv = {
     never = neverType,
@@ -1757,12 +1757,12 @@ local function constrainSubtype(state: InferenceState, position: caw.Position, s
         print(`Internal error: { typeToString(free) } has incompatible bounds: { typeToString(awn.simplify(free.LowerBound)) } </: { typeToString(awn.simplify(free.UpperBound)) }`)
     end
 
-    check(sub, assert(super), position) -- TODO luau assert.
+    awn.check(sub, assert(super), position) -- TODO luau assert.
 
     log("")
 end
 
-local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, traversed: { [Type]: true }): Type
+local function substituteAllIn(ty: Type, substitutions: { read [Type]: Type }, traversed: { [Type]: true }): Type
     if traversed[ty] then
         return ty
     end
@@ -1773,22 +1773,24 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
 
     traversed[ty] = true
 
+    local replacement = ty
+
     if ty.Kind == "error" or ty.Kind == "never" or ty.Kind == "unknown"
         or ty.Kind == "Primitive" or ty.Kind == "Singleton"
     then
-        return ty
+        replacement = ty
     elseif ty.Kind == "List" then
-        return listType(substituteAllIn(ty.Items, substitutions, traversed))
+        replacement = listType(substituteAllIn(ty.Items, substitutions, traversed))
 
     elseif ty.Kind == "Generic" then
-        return if substitutions[ty] then substituteAllIn(substitutions[ty], substitutions, traversed) else ty
+        replacement = if substitutions[ty] then substituteAllIn(substitutions[ty], substitutions, traversed) else ty
     elseif ty.Kind == "Free" then
         if ty.LowerBound.Kind ~= "never" and ty.UpperBound.Kind == "unknown" then
-            return substituteAllIn(ty.LowerBound, substitutions, traversed)
+            replacement = substituteAllIn(ty.LowerBound, substitutions, traversed)
         elseif ty.UpperBound.Kind ~= "unknown" then
-            return substituteAllIn(ty.UpperBound, substitutions, traversed)
+            replacement = substituteAllIn(ty.UpperBound, substitutions, traversed)
         else
-            return ty
+            replacement = ty
         end
     elseif ty.Kind == "Function" then
         local params = table.create<<Type>>(#ty.Parameters)
@@ -1798,10 +1800,10 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
         end
 
         local rets = if ty.Returns then substituteAllIn(ty.Returns, substitutions, traversed) else nil
-        return functionType(ty.Generics, params, substituteAllIn(ty.Variadic, substitutions, traversed), rets)
+        replacement = functionType(ty.Generics, params, substituteAllIn(ty.Variadic, substitutions, traversed), rets)
 
     elseif ty.Kind == "Negation" then
-        return negationType(substituteAllIn_(ty.Negated, substitutions, traversed))
+        replacement = negationType(substituteAllIn(ty.Negated, substitutions, traversed))
 
     elseif ty.Kind == "Union" then
         local components = table.create<<Type>>(#ty.Components)
@@ -1810,7 +1812,7 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
             components[i] = substituteAllIn(c, substitutions, traversed)
         end
 
-        return unionType(components)
+        replacement = unionType(components)
 
     elseif ty.Kind == "Intersection" then
         local components = table.create<<Type>>(#ty.Components)
@@ -1819,7 +1821,7 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
             components[i] = substituteAllIn(c, substitutions, traversed)
         end
 
-        return intersectionType(components)
+        replacement = intersectionType(components)
 
     elseif ty.Kind == "PendingExpansion" then
         local arguments = table.create<<Type>>(#ty.Arguments)
@@ -1828,17 +1830,13 @@ local function substituteAllIn_(ty: Type, substitutions: { read [Type]: Type }, 
             arguments[i] = substituteAllIn(a, substitutions, traversed)
         end
 
-        return pendingExpansionType(ty.Name, arguments)
+        replacement = pendingExpansionType(ty.Name, arguments)
     else
         unreachable(ty.Kind)
         error(`Unreachable.`)
     end
-end
 
-function substituteAllIn(ty, substitutions, traversed: { [Type]: true }): Type
-    local replacement = substituteAllIn_(ty, substitutions, traversed)
     traversed[replacement] = true
-
     return replacement
 end
 
@@ -2055,6 +2053,85 @@ local function instantiateGenericsAtCallsite(fn: Type, callsite: Type): (Type, {
 
     assert(#newGens == 0)
     return awn.reduceTypeFunctions(substituteAllIn(fn, substitutions.Substitutions, {})), erroneous, ftyToGeneric
+end
+
+local function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnotation): Type
+    if annotation.Kind == "Error" then
+        return errorType
+    elseif annotation.Kind == "Unit" then
+        return errorReport(`'()' is only valid as a function return type annotation.`, position)
+    elseif annotation.Kind == "Reference" then
+        local ty = typeEnv[annotation.Reference]
+
+        if ty then
+            if typeEnvGenericParameters[ty] then
+                return errorReport(`'{ annotation.Reference }' requires type arguments.`, position)
+            else
+                return ty
+            end
+        else
+            return errorReport(`Unknown type '{ annotation.Reference }'`, position)
+        end
+    elseif annotation.Kind == "List" then
+        return listType(typeAnnotationToType(position, annotation.Items))
+
+    elseif annotation.Kind == "Singleton" then
+        return singletonType(annotation.Value)
+
+    elseif annotation.Kind == "Generic" then
+        local genTy = genericType(annotation.Name)
+
+        typeEnv[annotation.Name] = genTy
+        return genTy
+
+    elseif annotation.Kind == "Function" then
+        local gens = table.create<<Type>>(#annotation.Generics)
+
+        for i, gen in annotation.Generics do
+            gens[i] = typeAnnotationToType(position, gen)
+        end
+
+        local params = table.create<<Type>>(#annotation.Parameters)
+
+        for i, param in annotation.Parameters do
+            params[i] = typeAnnotationToType(position, param)
+        end
+
+        return functionType(gens, params, neverType, if annotation.Returns then typeAnnotationToType(position, annotation.Returns) else nil)
+
+    elseif annotation.Kind == "AliasInstantiation" then
+        local arguments = table.create<<Type>>(#annotation.Arguments)
+
+        for i, a in annotation.Arguments do
+            arguments[i] = typeAnnotationToType(position, a)
+        end
+
+        return pendingExpansionType(annotation.Name, arguments)
+
+    elseif annotation.Kind == "Negation" then
+        return negationType(typeAnnotationToType(position, annotation.Negated))
+
+    elseif annotation.Kind == "Union" then
+        local components = table.create<<Type>>(#annotation.Components)
+
+        for i, c in annotation.Components do
+            components[i] = typeAnnotationToType(position, c)
+        end
+
+        return unionType(components)
+
+    elseif annotation.Kind == "Intersection" then
+        local components = table.create<<Type>>(#annotation.Components)
+
+        for i, c in annotation.Components do
+            components[i] = typeAnnotationToType(position, c)
+        end
+
+        return intersectionType(components)
+    else
+        unreachable(annotation.Kind)
+        error(`Unreachable.`)
+    end
 end
 
 local function infer(state: InferenceState, expr: caw.Expression, expected: Type?): Type?
@@ -2497,7 +2574,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         log(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
         fnTy = instantiateGenericsAtCallsite(fnTy, callsiteTy)
-        check(fnTy, callsiteTy, expr.Position)
+        awn.check(fnTy, callsiteTy, expr.Position)
 
         local normFn = if fnTy.Kind == "Free" then normalize(fnTy.UpperBound) else normalize(fnTy)
 
@@ -2627,92 +2704,6 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         unreachable(expr.Type)
         error(`Unreachable.`)
     end
-end
-
-local function typeAnnotationToType_(position: caw.Position, annotation: caw.TypeAnnotation): Type
-    if annotation.Kind == "Error" then
-        return errorType
-    elseif annotation.Kind == "Unit" then
-        return errorReport(`'()' is only valid as a function return type annotation.`, position)
-    elseif annotation.Kind == "Reference" then
-        local ty = typeEnv[annotation.Reference]
-
-        if ty then
-            if typeEnvGenericParameters[ty] then
-                return errorReport(`'{ annotation.Reference }' requires type arguments.`, position)
-            else
-                return ty
-            end
-        else
-            return errorReport(`Unknown type '{ annotation.Reference }'`, position)
-        end
-    elseif annotation.Kind == "List" then
-        return listType(typeAnnotationToType_(position, annotation.Items))
-
-    elseif annotation.Kind == "Singleton" then
-        return singletonType(annotation.Value)
-
-    elseif annotation.Kind == "Generic" then
-        local genTy = genericType(annotation.Name)
-
-        typeEnv[annotation.Name] = genTy
-        return genTy
-
-    elseif annotation.Kind == "Function" then
-        local gens = table.create<<Type>>(#annotation.Generics)
-
-        for i, gen in annotation.Generics do
-            gens[i] = typeAnnotationToType_(position, gen)
-        end
-
-        local params = table.create<<Type>>(#annotation.Parameters)
-
-        for i, param in annotation.Parameters do
-            params[i] = typeAnnotationToType_(position, param)
-        end
-
-        return functionType(gens, params, neverType, if annotation.Returns then typeAnnotationToType_(position, annotation.Returns) else nil)
-
-    elseif annotation.Kind == "AliasInstantiation" then
-        local arguments = table.create<<Type>>(#annotation.Arguments)
-
-        for i, a in annotation.Arguments do
-            arguments[i] = typeAnnotationToType_(position, a)
-        end
-
-        return pendingExpansionType(annotation.Name, arguments)
-
-    elseif annotation.Kind == "Negation" then
-        return negationType(typeAnnotationToType_(position, annotation.Negated))
-
-    elseif annotation.Kind == "Union" then
-        local components = table.create<<Type>>(#annotation.Components)
-
-        for i, c in annotation.Components do
-            components[i] = typeAnnotationToType_(position, c)
-        end
-
-        return unionType(components)
-
-    elseif annotation.Kind == "Intersection" then
-        local components = table.create<<Type>>(#annotation.Components)
-
-        for i, c in annotation.Components do
-            components[i] = typeAnnotationToType_(position, c)
-        end
-
-        return intersectionType(components)
-    else
-        unreachable(annotation.Kind)
-        error(`Unreachable.`)
-    end
-end
-
-function typeAnnotationToType(position, annotation)
-    local ty = typeAnnotationToType_(position, annotation)
-    -- reduceTypeFunctions(ty)
-
-    return ty
 end
 
 local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: NormalizedType, position: caw.Position, result: SubtypingResult)
@@ -2981,7 +2972,7 @@ local function reduceTypeFunctions(ty: Type): Type
     return inited
 end
 
-function check(inferred: Type, annotation: Type, position: caw.Position, printNote: boolean?)
+function awn.check(inferred: Type, annotation: Type, position: caw.Position, printNote: boolean?)
     if annotation.Kind == "Error" then
         return
     end
@@ -3049,6 +3040,7 @@ end
 
 awn.normalize = normalize
 awn.isSubtypeOf = isSubtypeOf
+awn.isSupertypeOf = isSupertypeOf
 awn.isExactly = isExactly
 
 awn.intersect = intersect
@@ -3085,4 +3077,4 @@ awn.negationType = negationType
 awn.unionType = unionType
 awn.intersectionType = intersectionType
 
-return awn
+return table.freeze(awn)

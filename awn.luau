@@ -104,7 +104,7 @@ type TypeData =
     | IntersectionType
     | FreeType
 
-type Type = { AliasName: string? } & TypeData
+export type Type = { AliasName: string? } & TypeData
 
 type NormalizedBooleanType = {
     read hasTrue: boolean,

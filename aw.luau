@@ -335,22 +335,21 @@ if printAst then
     print("")
 end
 
-if #result.errors == 0 then
-    print("Output:")
-    local returned = caw.run(result.expressions)
-
-    if returned then
-        print(`= { caw.valueToString(returned) }`)
-    end
-else
-    print("Parse failed:")
+if #result.errors > 0 then
+    print("Parsing incomplete:")
 
     for _, err in result.errors do
         print(err)
     end
 
     print("")
-    return false
+else
+    print("Output:")
+    local returned = caw.run(result.expressions)
+
+    if returned then
+        print(`= { caw.valueToString(returned) }`)
+    end
 end
 
 print("\n--")

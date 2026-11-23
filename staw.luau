@@ -460,17 +460,199 @@ test("error reduceTypeFunctions() invalid type function", function()
     ]]))
 end)
 
---[[
+test("reduceTypeFunctions() negation", function()
+    expectType(requireNoErrors(check([[
+        let x: ~items<{ number }> = nil
+    ]])), "x").toBe("~number")
+end)
+
+test("issubtypeof_TypeFunction()", function()
+    expectType(requireNoErrors(check([[
+        let x: issubtypeof<number, number | nil> = true
+    ]])), "x").toBe("true")
+end)
+
+test("error issubtypeof_TypeFunction()", function()
+    requireError(check([[
+        let x: issubtypeof<number> = true
+    ]]))
+end)
+
+test("items_TypeFunction()", function()
+    expectType(requireNoErrors(check([[
+        let x: items<{ number }> = 1
+    ]])), "x").toBe("number")
+end)
+
+test("error items_TypeFunction()", function()
+    requireError(check([[
+        let x: items<nil> = 1
+    ]]))
+end)
+
+test("error items_TypeFunction() wrong number of arguments", function()
+    requireError(check([[
+        let x: items<nil, true> = 1
+    ]]))
+end)
+
+test("simplify_TypeFunction()", function()
+    expectType(requireNoErrors(check([[
+        let x: simplify<(number | nil) & (string | nil)> = nil
+    ]])), "x").toBe("nil")
+end)
+
+test("error simplify_TypeFunction()", function()
+    requireError(check([[
+        let x: simplify<> = nil
+    ]]))
+end)
+
+test("instantiateGenericsAtCallsite() applyBounds == false", function()
+    requireNoErrors(check([[
+        let x: (number) -> number = function<T>(x: T): T
+            return x
+        end
+    ]]))
+end)
+
+test("typeAnnotationToType() Function generics", function()
+    requireNoErrors(check([[
+        let x: <T>(T) -> T = function<U>(y: U): U
+            return y
+        end
+    ]]))
+end)
+
+test("error typeAnnotationToType() Reference unknown type", function()
+    requireError(check([[
+        type hello = hi
+    ]]))
+end)
+
+test("error typeAnnotationToType() Reference requires type arguments", function()
+    requireError(check([[
+        type test<T> = { T }
+        type test2 = test
+    ]]))
+end)
+
+test("error typeAnnotationToType() Unit", function()
+    requireError(check([[
+        type test = ()
+    ]]))
+end)
+
 test("incomplete type alias instantiation", function()
-    local result = check("type T = U<a")
-    expect(#result.errors).toBe(2)
+    local result = check("type test = hi<a")
+    expect(#result.errors).toBe(3)
     expect(result.errors[1]).toBe("1:18: Expected '>', but reached end-of-file.")
     expect(result.errors[2]).toBe("1:3: Unknown type 'a'.")
+    expect(result.errors[3]).toBe("1:1: Invalid type function 'hi'.")
 end)
 
 test("recursive parameter bounds", function()
-    requireNoErrors(check("function f(x, y) x = y y = x end"))
-end)]]
+    local result = check("function f(x, y) x = y y = x end")
+    expect(#result.errors).toBe(2)
+    expectType(result, "f")
+    -- TODO PROVISIONAL
+        .toBe("(t1, ('b <: t1)) -> ()\nwhere t1 = ('a <: ('b <: t1))")
+end)
+
+test("typeToString() negated", function()
+    expectType(requireNoErrors(check("let x: simplify<~nil> = 1")), "x").toBe("~nil")
+end)
+
+test("error isExactly() r2", function()
+    requireError(check("let x: { number | nil } = valuenever let y: { number } = x"))
+end)
+
+test("error isExactly() r2", function()
+    requireError(check("let x: { number } = valuenever let y: { number | nil } = x"))
+end)
+
+test("error isSubtypeOf() pending no equivalent", function()
+    requireError(check([[
+        function f<T>(x: T)
+            let y: items<T> = valuenever
+            let z: string = y
+        end
+    ]]))
+end)
+
+test("error isSubtypeOf() functions", function()
+    requireError(check([[
+        let x: number = print
+    ]]))
+end)
+
+test("error isSubtypeOf() lists", function()
+    requireError(check([[
+        let x: number = {}
+    ]]))
+end)
+
+--[=[
+test("error isSubtypeOf() strings singletons missing negation", function()
+    requireError(check([[
+        let x: ~"hi" = nil
+        let y: ~"hi" & ~"hello" = x
+    ]]))
+end)
+]=]--
+
+test("error isSubtypeOf() strings singletons unexpected noncofinite", function()
+    requireError(check([[
+        let x: "hi" | "hello" = "bye"
+    ]]))
+end)
+
+test("error isSubtypeOf() strings singletons excluded", function()
+    requireError(check([[
+        let x: ~"hi" = "hi"
+    ]]))
+end)
+
+test("error isFunctionSubtypeOf() would have to be", function()
+    requireError(check([[
+        let x: (number) -> string = function<T>(y: T): T
+            return y
+        end
+    ]]))
+end)
+
+test("union() functions", function()
+    expectType(requireNoErrors(check([[
+        let x: simplify<((boolean) -> string) | ((true) -> string)> = valuenever
+    ]])), "x").toBe("(true) -> string")
+end)
+
+test("union() functions mirrored", function()
+    expectType(requireNoErrors(check([[
+        let x: simplify<((true) -> string) | ((boolean) -> string)> = valuenever
+    ]])), "x").toBe("(true) -> string")
+end)
+
+test("error union() functions unrelated", function()
+    requireError(check([[
+        let x: simplify<((true) -> string) | ((nil) -> string)> = valuenever
+    ]]))
+end)
+
+test("error negate() generic", function()
+    -- TODO PROVISIONAL
+    expect(#check("function f<T>(x: T): ~T return valuenever end").errors).toBe(4)
+end)
+
+test("error negate() function", function()
+    -- TODO PROVISIONAL
+    expect(#check("type s = () -> () let x: ~s = valuenever").errors).toBe(3)
+end)
+
+test("error negate() list", function()
+    -- TODO PROVISIONAL
+    expect(#check("type s = { nil } let x: ~s = valuenever").errors).toBe(3)
+end)
 
 local function runTests()
     local succeeded = 0

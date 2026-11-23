@@ -1881,14 +1881,20 @@ type SubstitutionState = {
 
 local function substituteAllIn_(ty: Type, state: SubstitutionState): Type
     if state.inside[ty] then
+        errorReport(
+            `Encountered recursive type '{ typeToString(ty) }' unexpectedly, inference result may be incorrect.`,
+            { Line = 1, Column = 1, Offset = 1 }
+        )
         return ty
     end
     state.inside[ty] = true
 
     local fullSub = state.substitutions[ty]
     if fullSub then
+        fullSub = if fullSub ~= ty then substituteAllIn_(fullSub, state) else fullSub
         state.inside[ty] = nil
-        return substituteAllIn_(fullSub, state)
+
+        return fullSub
     end
 
     local replacement = ty
@@ -1947,7 +1953,7 @@ local function substituteAllIn_(ty: Type, state: SubstitutionState): Type
     state.traversed[replacement] = true
     state.traversed[ty] = true
 
-    state.inside[replacement] = nil
+    state.inside[ty] = nil
     return replacement
 end
 

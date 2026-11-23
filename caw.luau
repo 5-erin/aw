@@ -79,6 +79,7 @@ local symbols = {
 }
 
 local operators = {
+    ["#"] = true,
     ["+"] = true,
     ["-"] = true,
     ["*"] = true,
@@ -377,6 +378,7 @@ local function nextToken(state: ParseState): Token
         local next, pos = nextCharacter(state.Program, state.Position.Offset)
 
         if next == "=" or (next == "-" and c == "-")
+            or (next == "/" and c == "/")
             or next == ">" and c == "-"
         then
             token = c .. next
@@ -585,7 +587,12 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
             local closeInstantiation, consumeCloseInstantiation = peekNextToken(state)
             local typeArguments: { TypeAnnotation } = {}
 
-            while closeInstantiation.Type ~= ">" and closeInstantiation.Type ~= "EndOfFile" do
+            while closeInstantiation.Type ~= ">" do
+                if closeInstantiation.Type == "EndOfFile" then
+                    state.Report(`Expected '>', but reached end-of-file.`, closeInstantiation)
+                    break
+                end
+
                 table.insert(typeArguments, parseTypeAnnotation(state))
 
                 consumeOptionalComma(state)

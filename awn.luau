@@ -33,14 +33,13 @@ type Polarity = "Unknown" | "Negative" | "Positive" | "Mixed"
 
 type FreeType = {
     read Kind: "Free",
-    Name: string?,
     UpperBound: Type,
     LowerBound: Type,
 }
 
 type GenericType = {
     read Kind: "Generic",
-    Name: string?,
+    read Name: string?,
 }
 
 -- Types of the form `T<U>`, where they may have generics that need to be substituted,
@@ -1359,12 +1358,17 @@ local function isSubtypeOf(a: NormalizedType, b: NormalizedType): SubtypingResul
 
     if a.pending then
         for ty, upperBound in a.pending do
-            if not b.pending or not b.pending[ty] then
-                local upperBoundResult = isSubtypeOf(upperBound, b)
+            local otherBound = b.pending and b.pending[ty]
+            local upperBoundResult
 
-                if not upperBoundResult.holds then
-                    return subtypeFailure(surpressed, `Unexpected \`{ awn.typeToString(ty) }\ & { normalizationToString(upperBound) }.`)
-                end
+            if otherBound then
+                upperBoundResult = isSubtypeOf(upperBound, otherBound)
+            else
+                upperBoundResult = isSubtypeOf(upperBound, b)
+            end
+
+            if not upperBoundResult.holds then
+                return subtypeFailure(surpressed, `Unexpected \`{ awn.typeToString(ty) }{ if isUnknown(upperBound) then "" else " & " .. normalizationToString(upperBound) }\`.`)
             end
         end
     end
@@ -1417,6 +1421,7 @@ type ToStringOptions = {
 
 type ToStringState = {
     options: ToStringOptions,
+    assignedNames: { [Type]: string? },
     recursiveTypeCount: number,
     inside: { [Type]: true? },
     recursive: { [Type]: string? },
@@ -1446,9 +1451,12 @@ local function typeToString_(ty: Type, state: ToStringState): string
     state.inside[ty] = true
     local str
 
-    local function genericTypeName(tyvar: GenericType)
-        if tyvar.Name then
-            return tyvar.Name
+    local function genericTypeName(tyvar: Type)
+        assert(tyvar.Kind == "Generic")
+        local already = tyvar.Name or state.assignedNames[tyvar]
+
+        if already then
+            return already
         else
             local name = string.char((genericTypeNameCount + 19) % 26 + 65)
 
@@ -1465,16 +1473,19 @@ local function typeToString_(ty: Type, state: ToStringState): string
                 end
             end
 
-            tyvar.Name = name
+            state.assignedNames[tyvar] = name
             genericTypeNameCount += 1
 
             return name
         end
     end
 
-    local function freeTypeName(tyvar: FreeType)
-        if tyvar.Name then
-            return tyvar.Name
+    local function freeTypeName(tyvar: Type)
+        assert(tyvar.Kind == "Free")
+        local already = state.assignedNames[tyvar]
+
+        if already then
+            return already
         else
             local name = `'{ string.char(freeTypeNameCount % 26 + 97) }`
 
@@ -1482,7 +1493,7 @@ local function typeToString_(ty: Type, state: ToStringState): string
                 name ..= freeTypeNameCount // 25 + 1
             end
 
-            tyvar.Name = name
+            state.assignedNames[tyvar] = name
             freeTypeNameCount += 1
 
             return name
@@ -1528,9 +1539,9 @@ local function typeToString_(ty: Type, state: ToStringState): string
             params[i] = typeToString_(param, state)
         end
 
-        -- if ty.Variadic.Kind ~= "never" then
-        --     table.insert(params, `...{ typeToString_(ty.Variadic) }`)
-        -- end
+        if ty.Variadic.Kind ~= "never" then
+            table.insert(params, `...{ typeToString_(ty.Variadic, state) }`)
+        end
 
         str ..= `({ table.concat(params, ", ") }) -> `
         str ..= if ty.Returns then typeToString_(ty.Returns, state) else "()"
@@ -1617,9 +1628,13 @@ local function typeToString_(ty: Type, state: ToStringState): string
 end
 
 local function typeToString_inner(ty, tsopts: ToStringOptions?)
+    genericTypeNameCount = 0
+    freeTypeNameCount = 0
+
     local opts: ToStringOptions = tsopts or {}
     local state: ToStringState = {
         options = opts,
+        assignedNames = {},
         recursiveTypeCount = 0,
         inside = {},
         recursive = {},
@@ -1786,7 +1801,7 @@ local function normalizationToType(n: NormalizedType): Type
         return ty
     end
 
-    local ty = table.clone(unionType(t))
+    local ty = unionType(t)
     ty.AliasName = n.aliasName
 
     return ty
@@ -1868,13 +1883,14 @@ local function substituteAllIn_(ty: Type, state: SubstitutionState): Type
     if state.inside[ty] then
         return ty
     end
+    state.inside[ty] = true
 
     local fullSub = state.substitutions[ty]
     if fullSub then
+        state.inside[ty] = nil
         return substituteAllIn_(fullSub, state)
     end
 
-    state.inside[ty] = true
     local replacement = ty
 
     if ty.Kind == "error" or ty.Kind == "never" or ty.Kind == "unknown"
@@ -2259,7 +2275,7 @@ local function instantiateGenericsAtCallsite(fn: Type, callsite: Type, applyBoun
     return instantiation, erroneous, ftyToGeneric, bounds
 end
 
-local function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnotation): Type
+local function typeAnnotationToType_(position: caw.Position, annotation: caw.TypeAnnotation): Type
     if annotation.Kind == "Error" then
         return table.clone(errorType) -- For alias names.
 
@@ -2273,13 +2289,17 @@ local function typeAnnotationToType(position: caw.Position, annotation: caw.Type
             if typeEnvGenericParameters[ty] then
                 return errorReport(`'{ annotation.Reference }' requires type arguments.`, position)
             else
-                return table.clone(ty) -- For alias names.
+                if ty.Kind ~= "Generic" and ty.Kind ~= "Free" then
+                    return table.clone(ty) -- For alias names.
+                else
+                    return ty
+                end
             end
         else
-            return errorReport(`Unknown type '{ annotation.Reference }'`, position)
+            return errorReport(`Unknown type '{ annotation.Reference }'.`, position)
         end
     elseif annotation.Kind == "List" then
-        return listType(typeAnnotationToType(position, annotation.Items))
+        return listType(typeAnnotationToType_(position, annotation.Items))
 
     elseif annotation.Kind == "Singleton" then
         return singletonType(annotation.Value)
@@ -2294,34 +2314,34 @@ local function typeAnnotationToType(position: caw.Position, annotation: caw.Type
         local gens = table.create<<Type>>(#annotation.Generics)
 
         for i, gen in annotation.Generics do
-            gens[i] = typeAnnotationToType(position, gen)
+            gens[i] = typeAnnotationToType_(position, gen)
         end
 
         local params = table.create<<Type>>(#annotation.Parameters)
 
         for i, param in annotation.Parameters do
-            params[i] = typeAnnotationToType(position, param)
+            params[i] = typeAnnotationToType_(position, param)
         end
 
-        return functionType(gens, params, neverType, if annotation.Returns then typeAnnotationToType(position, annotation.Returns) else nil)
+        return functionType(gens, params, neverType, if annotation.Returns then typeAnnotationToType_(position, annotation.Returns) else nil)
 
     elseif annotation.Kind == "AliasInstantiation" then
         local arguments = table.create<<Type>>(#annotation.Arguments)
 
         for i, a in annotation.Arguments do
-            arguments[i] = typeAnnotationToType(position, a)
+            arguments[i] = typeAnnotationToType_(position, a)
         end
 
         return pendingExpansionType(annotation.Name, arguments)
 
     elseif annotation.Kind == "Negation" then
-        return negationType(typeAnnotationToType(position, annotation.Negated))
+        return negationType(typeAnnotationToType_(position, annotation.Negated))
 
     elseif annotation.Kind == "Union" then
         local components = table.create<<Type>>(#annotation.Components)
 
         for i, c in annotation.Components do
-            components[i] = typeAnnotationToType(position, c)
+            components[i] = typeAnnotationToType_(position, c)
         end
 
         return unionType(components)
@@ -2330,7 +2350,7 @@ local function typeAnnotationToType(position: caw.Position, annotation: caw.Type
         local components = table.create<<Type>>(#annotation.Components)
 
         for i, c in annotation.Components do
-            components[i] = typeAnnotationToType(position, c)
+            components[i] = typeAnnotationToType_(position, c)
         end
 
         return intersectionType(components)
@@ -2338,6 +2358,11 @@ local function typeAnnotationToType(position: caw.Position, annotation: caw.Type
         unreachable(annotation.Kind)
         error(`Unreachable.`)
     end
+end
+
+local function typeAnnotationToType(position: caw.Position, annotation: caw.TypeAnnotation): Type
+    local ty = typeAnnotationToType_(position, annotation)
+    return awn.reduceTypeFunctions(ty)
 end
 
 local function infer(state: InferenceState, expr: caw.Expression, expected: Type?): Type?
@@ -2426,21 +2451,23 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         if expr.Operator == "-" then
             local operand = infer(state, expr.Operand, numberType)
 
-            if not operand then
-                return errorReport(`Attempted to use '-' on expression that returns no value.`, expr.Operand.Position)
+            if operand then
+                constrainSubtype(state, expr.Operand.Position, operand, numberType)
+            else
+                errorReport(`Attempted to use '-' on expression that returns no value.`, expr.Operand.Position)
             end
 
-            constrainSubtype(state, expr.Operand.Position, operand, numberType)
             return numberType
 
         elseif expr.Operator == "#" then
             local operand = infer(state, expr.Operand, unionType({ stringType, topListType }))
 
-            if not operand then
-                return errorReport(`Attempted to use '#' on expression that returns no value.`, expr.Operand.Position)
+            if operand then
+                constrainSubtype(state, expr.Operand.Position, operand, unionType({ stringType, topListType }))
+            else
+                errorReport(`Attempted to use '#' on expression that returns no value.`, expr.Operand.Position)
             end
 
-            constrainSubtype(state, expr.Operand.Position, operand, unionType({ stringType, topListType }))
             return numberType
         else
             unreachable(expr.Operator)
@@ -2456,11 +2483,11 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             local ref = typeAssociations[variable.Reference] or localTypeAssociations[variable.Reference]
 
             if not ref then
-                return errorReport(`Undefined variable '{ variable.Reference }'`, variable.Position)
+                return errorReport(`Undefined variable '{ variable.Reference }'.`, variable.Position)
             end
 
             if not ref.Expression then
-                return errorReport(`Cannot assign to builtins`, variable.Position)
+                return errorReport(`Cannot assign to builtins.`, variable.Position)
             end
 
             assert(ref.Expression.Type == "Declaration" or ref.Expression.Type == "Function", ref.Expression.Type)
@@ -2503,16 +2530,17 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             local leftTy = infer(state, expr.Left, numberType)
             local rightTy = infer(state, expr.Right, numberType)
 
-            if not leftTy then
-                return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
+            if leftTy then
+                constrainSubtype(state, expr.Left.Position, leftTy, numberType)
+            else
+                errorReport(`LHS is expression returning no value.`, expr.Left.Position)
             end
 
-            if not rightTy then
-                return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
+            if rightTy then
+                constrainSubtype(state, expr.Right.Position, rightTy, numberType)
+            else
+                errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
-
-            constrainSubtype(state, expr.Left.Position, leftTy, numberType)
-            constrainSubtype(state, expr.Right.Position, rightTy, numberType)
 
             return numberType
 
@@ -2520,16 +2548,17 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             local leftTy = infer(state, expr.Left, stringType)
             local rightTy = infer(state, expr.Right, stringType)
 
-            if not leftTy then
-                return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
+            if leftTy then
+                constrainSubtype(state, expr.Left.Position, leftTy, stringType)
+            else
+                errorReport(`LHS is expression returning no value.`, expr.Left.Position)
             end
 
-            if not rightTy then
-                return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
+            if rightTy then
+                constrainSubtype(state, expr.Right.Position, rightTy, stringType)
+            else
+                errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
-
-            constrainSubtype(state, expr.Left.Position, leftTy, stringType)
-            constrainSubtype(state, expr.Right.Position, rightTy, stringType)
 
             return stringType
 
@@ -2539,29 +2568,32 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             local leftTy = infer(state, expr.Left, numberType)
             local rightTy = infer(state, expr.Right, numberType)
 
-            if not leftTy then
-                return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
+            if leftTy then
+                constrainSubtype(state, expr.Left.Position, leftTy, numberType)
+            else
+                errorReport(`LHS is expression returning no value.`, expr.Left.Position)
             end
 
-            if not rightTy then
-                return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
+            if rightTy then
+                constrainSubtype(state, expr.Right.Position, rightTy, numberType)
+            else
+                errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
-
-            constrainSubtype(state, expr.Left.Position, leftTy, numberType)
-            constrainSubtype(state, expr.Right.Position, rightTy, numberType)
 
             return booleanType
 
         elseif expr.Operator == "==" or expr.Operator == "~=" then
             if not infer(state, expr.Left, unknownType) then
-                return errorReport(`LHS is expression returning no value.`, expr.Left.Position)
+                errorReport(`LHS is expression returning no value.`, expr.Left.Position)
             end
 
             if not infer(state, expr.Right, unknownType) then
-                return errorReport(`RHS is expression returning no value.`, expr.Right.Position)
+                errorReport(`RHS is expression returning no value.`, expr.Right.Position)
             end
 
             return booleanType
+        elseif expr.Operator == "#" then
+            return errorReport(`'#' is only valid as a unary operator.`, expr.Position)
         else
             unreachable(expr.Operator)
             error(`Cannot infer '{ expr.Operator }' operations.`)
@@ -2750,23 +2782,20 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             return state.ReturnType
 
         elseif retTy ~= nil then
-            if retTy == false then
-                return errorReport(`Function is annotated as returning no value, got 'return' statement here.`, expr.Position)
-            end
-
-            local thisRet
-
             if expr.Return then
-                thisRet = infer(state, expr.Return, if retTy.Kind == "Free" then freeType() else retTy)
-            end
-
-            if thisRet then
-                if retTy.Kind == "Free" then
-                    retTy.LowerBound = makeUnion(retTy.LowerBound, thisRet)
-                    return retTy
+                if retTy == false then
+                    return errorReport(`Function is annotated as returning no value, but returning a value here.`, expr.Position)
                 else
-                    constrainSubtype(state, expr.Position, thisRet, retTy)
-                    return retTy
+                    local thisRet = infer(state, expr.Return, if retTy.Kind == "Free" then freeType() else retTy)
+
+                    if thisRet then
+                        constrainSubtype(state, expr.Position, thisRet, retTy)
+                        return retTy
+                    end
+                end
+            else
+                if retTy ~= false then
+                    return errorReport(`Expected to return '{ typeToString(retTy) }', but not returning anything here.`, expr.Position)
                 end
             end
 
@@ -2912,7 +2941,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
     elseif expr.Type == "IfCondition" then -- TODO luau cast?
-        infer(state, expr.Condition, unknownType)
+        infer(state, expr.Condition)
 
         local result = nil
 
@@ -2946,17 +2975,25 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
     elseif expr.Type == "VariadicSelection" then
         if state.Variadic then
+            local selector = infer(state, expr.Selection)
+
+            if selector then
+                constrainSubtype(state, expr.Selection.Position, selector, numberType)
+            else
+                errorReport(`Tried to select with expression that returns no value.`, expr.Selection.Position)
+            end
+
             return state.Variadic
         else
             return errorReport(`Function does not have a variadic.`, expr.Position)
         end
 
     elseif expr.Type == "VariadicLength" then
-        if state.Variadic then
-            return numberType
-        else
-            return errorReport(`Function does not have a variadic.`, expr.Position)
+        if not state.Variadic then
+            errorReport(`Function does not have a variadic.`, expr.Position)
         end
+
+        return numberType
 
     elseif expr.Type == "TypeAliasDeclaration" then
         if typeEnv[expr.Name] or localTypeEnv[expr.Name] then
@@ -3153,7 +3190,7 @@ local function reduceTypeFunctions(ty: Type): Type
         log(`Trying to reduce '{ typeToString(ty) }'`)
 
         local typeFunction = typeFunctions[ty.Name]
-        local aliasing = typeEnv[ty.Name]
+        local aliasing = typeEnv[ty.Name] or localTypeEnv[ty.Name]
 
         if typeFunction then
             local arguments = table.create<<Type>>(#ty.Arguments)
@@ -3208,40 +3245,22 @@ local function reduceTypeFunctions(ty: Type): Type
 
     elseif ty.Kind == "Union" then
         local components = table.create<<Type>>(#ty.Components)
-        local changed = false
 
         for i, c in ty.Components do
-            local new = reduceTypeFunctions(c)
-            components[i] = new
-
-            if new ~= c then
-                changed = true
-            end
+            components[i] = reduceTypeFunctions(c)
         end
 
-        if changed then
-            inited = unionType(components)
-        else
-            inited = ty
-        end
+        inited = unionType(components)
+
     elseif ty.Kind == "Intersection" then
         local components = table.create<<Type>>(#ty.Components)
-        local changed = false
 
         for i, c in ty.Components do
-            local new = reduceTypeFunctions(c)
-            components[i] = new
-
-            if new ~= c then
-                changed = true
-            end
+            components[i] = reduceTypeFunctions(c)
         end
 
-        if changed then
-            inited = intersectionType(components)
-        else
-            inited = ty
-        end
+        inited = intersectionType(components)
+
     elseif ty.Kind == "List" then
         inited = listType(reduceTypeFunctions(ty.Items))
     elseif ty.Kind == "Function" then

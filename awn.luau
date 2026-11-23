@@ -11,6 +11,7 @@ local awn = {}
 
 local caw = require("./caw")
 local logInference = false
+local typeErrors = {}
 
 type ErrorType = {
     read Kind: "error",
@@ -240,7 +241,7 @@ local function intersectionType(components: { read Type })
 end
 
 local function errorReport(message, position: caw.Position): Type
-    print(`{ position.Line }:{ position.Column }: { message }`)
+    table.insert(typeErrors, `{ position.Line }:{ position.Column }: { message }`)
     return errorType
 end
 
@@ -384,7 +385,7 @@ local function negate(n: NormalizedType): NormalizedType
     local errors = n.errors
 
     if hasNonNegatables(n) then
-        print(`Type has non-negatables, such as discrete (non-top) lists, functions, generics, type functions, or free types.`)
+        table.insert(typeErrors, `Type has non-negatables, such as discrete (non-top) lists, functions, generics, type functions, or free types.`)
         errors = true
     end
 
@@ -525,7 +526,7 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
                         redundant = true
                         break
                     else
-                        print(`Cannot union unrelated discrete function types.`)
+                        table.insert(typeErrors, `Cannot union unrelated discrete function types.`)
                         failed = true
                         errors = true
                     end
@@ -1405,7 +1406,8 @@ end
 
 local genericTypeNameCount = 0
 local freeTypeNameCount = 0
-local typeEnv: { [string]: Type? }
+local typeEnv: { read [string]: Type? }
+local localTypeEnv: { [string]: Type? } = {}
 
 type ToStringOptions = {
     read Alias: string?,
@@ -1800,7 +1802,7 @@ typeEnv = {
     string = stringType,
 }
 -- Maps declaration names to types.
-local typeAssociations: { [string]: { Expression: caw.Expression?, Type: Type }? } = {
+local typeAssociations: { read [string]: { Expression: caw.Expression?, Type: Type }? } = {
     valuenever = {
         Type = neverType
     },
@@ -1812,6 +1814,9 @@ local typeAssociations: { [string]: { Expression: caw.Expression?, Type: Type }?
         Type = functionType({}, { unknownType }, neverType, stringType),
     }
 }
+
+local localTypeAssociations: { [string]: { Expression: caw.Expression, Type: Type }? } = {}
+
 -- The generics that a type alias is parameterized over.
 local typeEnvGenericParameters: { [Type]: { read Type }? } = {}
 local typeEnvOrdered: { string } = {}
@@ -1845,7 +1850,7 @@ local function constrainSubtype(state: InferenceState, position: caw.Position, s
 
     for _, free in erroneous do
         assert(free.Kind == "Free")
-        print(`Internal error: { typeToString(free) } has incompatible bounds: { typeToString(awn.simplify(free.LowerBound)) } </: { typeToString(awn.simplify(free.UpperBound)) }`)
+        table.insert(typeErrors, `Internal error: { typeToString(free) } has incompatible bounds: { typeToString(awn.simplify(free.LowerBound)) } </: { typeToString(awn.simplify(free.UpperBound)) }`)
     end
 
     awn.check(sub, assert(super), position) -- TODO luau assert.
@@ -2237,15 +2242,15 @@ local function instantiateGenericsAtCallsite(fn: Type, callsite: Type, applyBoun
     )
 
     if logInference then
-        print(`Implicit generic instantiations:`)
+        log(`Implicit generic instantiations:`)
         for gen, ty in concretizationResult.substitutions do
-            print(`* { typeToString(gen) } => { typeToString(ty) }`)
+            log(`* { typeToString(gen) } => { typeToString(ty) }`)
         end
-        print("")
+        log("")
     end
 
     if #concretizationResult.generics > 0 then
-        print(`Internal error: introduced generics while concretizing '{ typeToString(fn) }' with '{ typeToString(callsite) }'`)
+        log(`Internal error: introduced generics while concretizing '{ typeToString(fn) }' with '{ typeToString(callsite) }'`)
     end
 
     local instantiation = awn.reduceTypeFunctions(substituteAllIn(fn, concretizationResult.substitutions, {}))
@@ -2262,7 +2267,7 @@ local function typeAnnotationToType(position: caw.Position, annotation: caw.Type
         return errorReport(`'()' is only valid as a function return type annotation.`, position)
 
     elseif annotation.Kind == "Reference" then
-        local ty = typeEnv[annotation.Reference]
+        local ty = typeEnv[annotation.Reference] or localTypeEnv[annotation.Reference]
 
         if ty then
             if typeEnvGenericParameters[ty] then
@@ -2354,7 +2359,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
         -- TODO luau type error on `ty` when `anno or` is removed
-        typeAssociations[expr.Declaration.Name] = {
+        localTypeAssociations[expr.Declaration.Name] = {
             Expression = expr,
             Type = anno or ty or errorType
         }
@@ -2369,7 +2374,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
     elseif expr.Type == "Reference" then
         local name = expr.Reference
-        local referred = typeAssociations[name]
+        local referred = typeAssociations[name] or localTypeAssociations[name]
 
         if referred then
             return referred.Type
@@ -2448,7 +2453,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             local value = expr.Right
 
             assert(variable.Type == "Reference")
-            local ref = typeAssociations[variable.Reference]
+            local ref = typeAssociations[variable.Reference] or localTypeAssociations[variable.Reference]
 
             if not ref then
                 return errorReport(`Undefined variable '{ variable.Reference }'`, variable.Position)
@@ -2485,7 +2490,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             if annoTy then
                 constrainSubtype(state, value.Position, valueTy, annoTy)
             else
-                typeAssociations[variable.Reference] = {
+                localTypeAssociations[variable.Reference] = {
                     Expression = ref.Expression,
                     Type = makeUnion(ref.Type, valueTy),
                 }
@@ -2579,14 +2584,14 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
             params[i] = ty
 
-            typeAssociations[param.Name] = {
+            localTypeAssociations[param.Name] = {
                 Expression = expr,
                 Type = ty,
             }
         end
 
         if expr.Function.Name then
-            typeAssociations[expr.Function.Name] = {
+            localTypeAssociations[expr.Function.Name] = {
                 Type = functionType({}, params, neverType, freeType()),
                 Expression = expr,
             }
@@ -2650,7 +2655,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         generalizer.polarity = "Negative"
 
         for i, param in expr.Function.Parameters do
-            typeAssociations[param.Name] = nil
+            localTypeAssociations[param.Name] = nil
 
             local paramTy = params[i]
 
@@ -2673,11 +2678,11 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         assert(next(generalizer.inside) == nil)
 
         if logInference then
-            print("Free type substitutions:")
+            log("Free type substitutions:")
             for fty, ty in generalizer.substitutions do
-                print(`* { typeToString(fty) } => { typeToString(ty) }{ if table.find(generalizer.generics, ty) then " (introduced generic)" else "" }`)
+                log(`* { typeToString(fty) } => { typeToString(ty) }{ if table.find(generalizer.generics, ty) then " (introduced generic)" else "" }`)
             end
-            print("")
+            log("")
         end
 
         local substitutor: SubstitutionState = {
@@ -2716,7 +2721,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local fty = functionType(gens, params, varTy, if typeof(retTy) == "table" then retTy else nil)
 
         if expr.Function.Name then
-            typeAssociations[expr.Function.Name] = {
+            localTypeAssociations[expr.Function.Name] = {
                 Type = fty,
                 Expression = expr,
             }
@@ -2770,7 +2775,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
             return errorReport(`Cannot 'return' outside of functions.`, expr.Position)
         end
     elseif expr.Type == "Call" then
-        local fn = typeAssociations[expr.Call.Identifier]
+        local fn = typeAssociations[expr.Call.Identifier] or localTypeAssociations[expr.Call.Identifier]
 
         if not fn then
             return errorReport(`Unknown function '{ expr.Call.Identifier }'.`, expr.Position)
@@ -2954,7 +2959,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         end
 
     elseif expr.Type == "TypeAliasDeclaration" then
-        if typeEnv[expr.Name] then
+        if typeEnv[expr.Name] or localTypeEnv[expr.Name] then
             return errorReport(`Cannot re-define type '{ expr.Name }'.`, expr.Position)
         end
 
@@ -2968,7 +2973,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
                 local genTy = typeAnnotationToType(expr.Position, gen)
                 gens[i] = genTy
-                typeEnv[gen.Name] = genTy
+                localTypeEnv[gen.Name] = genTy
             end
         end
 
@@ -2979,11 +2984,11 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         if gens then
             for _, genTy in gens do
                 assert(genTy.Kind == "Generic")
-                typeEnv[genTy.Name] = nil
+                localTypeEnv[assert(genTy.Name)] = nil
             end
         end
 
-        typeEnv[expr.Name] = ty
+        localTypeEnv[expr.Name] = ty
         table.insert(typeEnvOrdered, expr.Name)
 
         return errorType
@@ -2996,7 +3001,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 end
 
 local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: NormalizedType, position: caw.Position, result: SubtypingResult)
-    local err = `{ position.Line }:{ position.Column }: Type error: `
+    local err = `Type error: `
 
     local as = typeToString(a)
     local nas = normalizationToString(na)
@@ -3030,7 +3035,7 @@ local function reportMismatch(a: Type, na: NormalizedType, b: Type, nb: Normaliz
 
     err ..= `. { result.failedPath }`
 
-    print(err)
+    errorReport(err, position)
 end
 
 type Ok = { read State: "Ok", read Value: Type }
@@ -3274,31 +3279,19 @@ function awn.check(inferred: Type, annotation: Type, position: caw.Position, pri
     if not subtypeResult.holds and not subtypeResult.errorSurpressed then
         reportMismatch(inferred, normalizedInference, annotation, normalizedAnnotation, position, subtypeResult)
     elseif printNote then
-        print(`'{ typeToString(inferred) }' is a subtype of '{ typeToString(annotation) }'.`)
+        table.insert(typeErrors, `'{ typeToString(inferred) }' is a subtype of '{ typeToString(annotation) }'.`)
     end
 end
 
-function awn.run(expressions: { read caw.Expression }, options: { read LogInference: boolean })
-    logInference = options.LogInference
-
-    local state: InferenceState = {
-        ReturnType = nil,
-    }
-
-    local builtins = {}
-
-    for k, _ in typeEnv do
-        builtins[k] = true
-    end
-
-    for _, expr in expressions do
-        infer(state, expr)
-    end
-
+local function dumpResults()
     print("")
 
+    for _, err in typeErrors do
+        print(err)
+    end
+
     for _, k in typeAssociationsOrdered do
-        local t = typeAssociations[k]
+        local t = localTypeAssociations[k]
         if t then
             print(`{ k }: { t.Type.AliasName or typeToString(reduceTypeFunctions(t.Type)) }`)
         end
@@ -3307,24 +3300,49 @@ function awn.run(expressions: { read caw.Expression }, options: { read LogInfere
     print("")
 
     for _, k in typeEnvOrdered do
-        if not builtins[k] then
-            local a = assert(typeEnv[k])
-            local gens = typeEnvGenericParameters[a]
-            local gensString = ""
+        local a = assert(localTypeEnv[k])
+        local gens = typeEnvGenericParameters[a]
+        local gensString = ""
 
-            if gens then
-                local gensStr = table.create<<string>>(#gens)
+        if gens then
+            local gensStr = table.create<<string>>(#gens)
 
-                for i, gen in gens do
-                    gensStr[i] = typeToString(gen)
-                end
-
-                gensString = `<{ table.concat(gensStr, ", ") }>`
+            for i, gen in gens do
+                gensStr[i] = typeToString(gen)
             end
 
-            print(`type { k }{ gensString } = { typeToString(simplify(reduceTypeFunctions(a)), { Alias = k }) }`)
+            gensString = `<{ table.concat(gensStr, ", ") }>`
         end
+
+        print(`type { k }{ gensString } = { typeToString(simplify(reduceTypeFunctions(a)), { Alias = k }) }`)
     end
+end
+
+function awn.run(expressions: { read caw.Expression }, options: { read LogInference: boolean, read DumpResults: boolean? })
+    localTypeEnv = {}
+    table.clear(typeEnvOrdered)
+    localTypeAssociations = {}
+    table.clear(typeAssociationsOrdered)
+
+    logInference = options.LogInference
+
+    local state: InferenceState = {
+        ReturnType = nil,
+    }
+
+    for _, expr in expressions do
+        infer(state, expr)
+    end
+
+    if options.DumpResults then
+        dumpResults()
+    end
+
+    return {
+        typeErrors = typeErrors,
+        localTypeEnv = localTypeEnv,
+        localTypeAssociations = localTypeAssociations,
+    }
 end
 
 awn.normalize = normalize

@@ -353,7 +353,7 @@ print("\n--")
 if inferer == "hm" then
     inferers.hm(result.Expressions, { LogInference = logInference })
 elseif inferer == "sn" then
-    inferers.sn.run(result.Expressions, { LogInference = logInference })
+    inferers.sn.run(result.Expressions, { LogInference = logInference, DumpResults = true })
 else
     unreachable(inferer)
     error(`Unreachable.`)

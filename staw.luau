@@ -48,15 +48,63 @@ local function expectErrorCount(result: CheckResult)
 end
 
 local function requireNoErrors(result: CheckResult)
-    expectErrorCount(result).toBe(0)
+    if #result.errors > 0 then
+        -- TODO luau cast.
+        error(`FAILTEST: Got { #result.errors } error(s):\n* { table.concat(result.errors :: any, "\n* ") }`)
+    end
+
+    return result
 end
 
-test("infer constant", function()
+local function requireError(result: CheckResult, error: string)
+    expectErrorCount(result).toBe(1)
+    expect(result.errors[1]).toBe(error)
+
+    return result
+end
+
+local function expectType(result: CheckResult, name: string)
+    local var = result.localTypeAssociations[name]
+
+    if not var then
+        error(`FAILTEST: '{ name }' was not defined.`)
+    end
+
+    return expect(awn.typeToString(var.Type))
+end
+
+test("infer declaration constant", function()
     requireNoErrors(check("let x = 5"))
 end)
 
-test("infer singleton", function()
-    requireNoErrors(check("let y = \"hello\""))
+test("infer declaration singleton", function()
+    requireNoErrors(check("let x = \"hello\""))
+end)
+
+test("error infer declaration void", function()
+    requireError(check("let x = print(1)"), "1:3: Trying to assign 'x' to an expression returning no values.")
+end)
+
+test("infer declaration annotated", function()
+    requireNoErrors(check("let x: number = 1"))
+end)
+
+test("infer reference", function()
+    requireNoErrors(check("print"))
+end)
+
+test("error infer reference", function()
+    requireError(check("nonexistent"), "1:3: Invalid reference 'nonexistent'.")
+end)
+
+test("infer list empty", function()
+    requireNoErrors(check("let x = {}"))
+end)
+
+test("infer list with items", function()
+    -- TODO PROVISIONAL
+    expectType(requireNoErrors(check("let x = { 1, true }")), "x")
+        .toBe("{ (number | true <: 'b) }")
 end)
 
 local function runTests()

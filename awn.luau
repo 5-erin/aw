@@ -3330,6 +3330,7 @@ function awn.run(expressions: { read caw.Expression }, options: { read LogInfere
     table.clear(typeEnvOrdered)
     localTypeAssociations = {}
     table.clear(typeAssociationsOrdered)
+    typeErrors = {}
 
     logInference = options.LogInference
 

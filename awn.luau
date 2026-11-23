@@ -3286,7 +3286,8 @@ end
 local function dumpResults()
     print("")
 
-    for _, err in typeErrors do
+    -- TODO annotation?
+    for _, err: string in typeErrors do
         print(err)
     end
 
@@ -3318,7 +3319,13 @@ local function dumpResults()
     end
 end
 
-function awn.run(expressions: { read caw.Expression }, options: { read LogInference: boolean, read DumpResults: boolean? })
+export type SolverResult = {
+    read typeErrors: { read string? },
+    read localTypeEnv: { read [string]: Type? },
+    read localTypeAssociations: { read [string]: { read Expression: caw.Expression, read Type: Type }? }
+}
+
+function awn.run(expressions: { read caw.Expression }, options: { read LogInference: boolean, read DumpResults: boolean? }): SolverResult
     localTypeEnv = {}
     table.clear(typeEnvOrdered)
     localTypeAssociations = {}

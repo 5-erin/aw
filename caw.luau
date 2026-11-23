@@ -301,7 +301,7 @@ type ExpressionData =
 
 export type Expression = ExpressionData & { Position: Position }
 
-export type ParseResult = { read Success: boolean, read Expressions: { read Expression } }
+export type ParseResult = { read errors: { read string }, read expressions: { read Expression } }
 
 local keywords: { read [string]: Keyword? } = {
     ["nil"] = "nil",
@@ -1200,8 +1200,7 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
 end
 
 function caw.parse(program: string): ParseResult
-    local success = true
-
+    local errors: { string } = {}
     local state: ParseState = {
         Program = program,
         Position = {
@@ -1211,8 +1210,7 @@ function caw.parse(program: string): ParseResult
         },
         FunctionDepth = 0,
         Report = function(s, e)
-            success = false
-            print(`{ e.Position.Line }:{ e.Position.Column }: { s }`)
+            table.insert(errors, `{ e.Position.Line }:{ e.Position.Column }: { s }`)
         end,
     }
 
@@ -1228,7 +1226,7 @@ function caw.parse(program: string): ParseResult
         tk = peekNextToken(state)
     end
 
-    return { Success = success, Expressions = exprs }
+    return { errors = errors, expressions = exprs }
 end
 
 local function makeLuauFuncValue(fn: ({ Value }) -> Value?): Value

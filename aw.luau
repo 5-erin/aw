@@ -331,29 +331,34 @@ local result = caw.parse(program)
 
 if printAst then
     print("AST:\n")
-    print(prettyPrint(result.Expressions))
+    print(prettyPrint(result.expressions))
     print("")
 end
 
-if result.Success then
+if #result.errors == 0 then
     print("Output:")
-    local returned = caw.run(result.Expressions)
+    local returned = caw.run(result.expressions)
 
     if returned then
         print(`= { caw.valueToString(returned) }`)
     end
 else
-    print("Parse failed.")
+    print("Parse failed:")
 
+    for _, err in result.errors do
+        print(err)
+    end
+
+    print("")
     return false
 end
 
 print("\n--")
 
 if inferer == "hm" then
-    inferers.hm(result.Expressions, { LogInference = logInference })
+    inferers.hm(result.expressions, { LogInference = logInference })
 elseif inferer == "sn" then
-    inferers.sn.run(result.Expressions, { LogInference = logInference, DumpResults = true })
+    inferers.sn.run(result.expressions, { LogInference = logInference, DumpResults = true })
 else
     unreachable(inferer)
     error(`Unreachable.`)

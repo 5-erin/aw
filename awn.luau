@@ -452,7 +452,7 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
         elseif not aStrings.cofinite and not bStrings.cofinite then
             local singles: { [string]: true } = {}
 
-            for s, _ in bSingles do
+            for s, _ in aSingles do
                 singles[s] = true
             end
 
@@ -589,7 +589,7 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
     }
 end
 
-local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
+local function intersect(a: NormalizedType, b: NormalizedType, inside: { [Type]: true? }?): NormalizedType
     local errors = a.errors or b.errors
     local nils = a.nils and b.nils
     local numbers = a.numbers and b.numbers
@@ -705,7 +705,16 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
         pending = {}
 
         for ty, intersectsWith in a.pending do
+            local nowInside = inside or {}
+
+            if nowInside[ty] then
+                continue
+            end
+            nowInside[ty] = true
+
             pending[ty] = intersect(intersectsWith, b)
+
+            nowInside[ty] = nil
         end
     end
 
@@ -714,11 +723,20 @@ local function intersect(a: NormalizedType, b: NormalizedType): NormalizedType
         assert(pending)
 
         for ty, intersectsWith in b.pending do
-            if pending[ty] then
-                pending[ty] = intersect(pending[ty], a)
-            else
-                pending[ty] = intersect(intersectsWith, a)
+            local nowInside = inside or {}
+
+            if nowInside[ty] then
+                continue
             end
+            nowInside[ty] = true
+
+            if pending[ty] then
+                pending[ty] = intersect(pending[ty], a, nowInside)
+            else
+                pending[ty] = intersect(intersectsWith, a, nowInside)
+            end
+
+            nowInside[ty] = nil
         end
     end
 
@@ -1144,7 +1162,11 @@ function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctio
                         assert(gen)
                         assert(free.Kind == "Free")
 
-                        table.insert(failed, `'{ awn.typeToString(gen) }' would have to be a subtype of '{ awn.typeToString(bound.upper) }' while being called with '{ awn.typeToString(bound.lower) }'.`)
+                        table.insert(
+                            failed,
+                            `'{ awn.typeToString(gen) }' would have to be a subtype of '{ awn.typeToString(bound.upper) }'`
+                                .. ` while being called with '{ awn.typeToString(bound.lower) }'.`
+                        )
                         instantiationFailed = true
                     end
 
@@ -1171,7 +1193,8 @@ function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctio
                         local paramStr = normalizationToString(cb.parameters[i])
                         table.insert(
                             failed,
-                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" } does not accept parameter #{ i } '{ paramStr }': { paramResult.failedPath }`
+                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" }`
+                                .. ` does not accept parameter #{ i } '{ paramStr }': { paramResult.failedPath }`
                         )
 
                         paramsMatched = false
@@ -1627,14 +1650,18 @@ local function typeToString_(ty: Type, state: ToStringState): string
     return str
 end
 
+local loggingAssignedNames = {}
+
 local function typeToString_inner(ty, tsopts: ToStringOptions?)
-    genericTypeNameCount = 0
-    freeTypeNameCount = 0
+    if not logInference then
+        genericTypeNameCount = 0
+        freeTypeNameCount = 0
+    end
 
     local opts: ToStringOptions = tsopts or {}
     local state: ToStringState = {
         options = opts,
-        assignedNames = {},
+        assignedNames = if logInference then loggingAssignedNames else {},
         recursiveTypeCount = 0,
         inside = {},
         recursive = {},
@@ -1642,16 +1669,28 @@ local function typeToString_inner(ty, tsopts: ToStringOptions?)
     }
 
     typeToString_(ty, state)
-
-    state.currentlyRecursing = ty
     local str = typeToString_(ty, state)
 
-    if state.recursive then
+    if next(state.recursive) ~= nil then
         state.recursiveTypeCount = -math.huge
+        local onNewlines = false
+        local wheres = {}
 
         for ty, name in state.recursive do
             state.currentlyRecursing = ty
-            str ..= `\nwhere { name } = { typeToString_(ty, state) }`
+            local where = typeToString_(ty, state)
+
+            if #where > 32 then
+                onNewlines = true
+            end
+
+            table.insert(wheres, `where { name } = { where }`)
+        end
+
+        if onNewlines then
+            str ..= `\n{ table.concat(wheres, "\n") }`
+        else
+            str ..= " " .. table.concat(wheres, "\n")
         end
     end
 
@@ -1987,6 +2026,25 @@ type GatherFreeTypeSubstitutionsState = {
     inside: { [Type]: true? },
 }
 
+local function cleanSubstitution(ty: Type, sub: Type, polarity: Polarity)
+    if sub.Kind == "Free" then
+        local here = sub
+        local inside: { [Type]: true? } = {}
+
+        repeat
+            inside[here] = true
+            here = here.UpperBound
+
+            if inside[here] then
+                sub = unknownType
+                break
+            end
+        until here.Kind ~= "Free"
+    end
+
+    return sub
+end
+
 local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsState, ty: Type, name: string)
     local opts = state.options
 
@@ -2014,8 +2072,6 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
 
             if prevPolarity == state.polarity then
                 -- Already all ok.
-                state.inside[ty] = nil
-                return
             else
                 local normUpper = normalize(upper)
                 local replacement = nil
@@ -2037,7 +2093,6 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
                     end
                 else
                     -- Again, as we don't support generic bounds yet, just set the replacement to the upper bound if there is one.
-
                     if isUnknown(normUpper) then
                         replacement = genericType()
                         table.insert(state.generics, replacement)
@@ -2048,11 +2103,13 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
                     end
                 end
 
+                replacement = cleanSubstitution(ty, replacement)
                 state.substitutions[ty] = replacement
                 state.polarities[ty] = "Mixed"
-                state.inside[ty] = nil
-                return
             end
+
+            state.inside[ty] = nil
+            return
         end
 
         if state.polarity ~= "Positive" and isNever(normalize(upper)) then
@@ -2102,7 +2159,7 @@ local function gatherFreeTypeSubstitutions_(state: GatherFreeTypeSubstitutionsSt
 
             -- TODO: If we don't do this, then generics are left as free types in implicit instantiations at call sites.
             if not previous or not opts.alwaysConcretize or sub.Kind ~= "Free" then
-                state.substitutions[ty] = sub
+                state.substitutions[ty] = cleanSubstitution(ty, sub)
             else
                 log(`Discarding substitution { typeToString(sub) } for { typeToString(ty) } ({ state.polarity }) because { typeToString(previous) } was already set`)
             end
@@ -2200,7 +2257,6 @@ type InferenceState = {
     ReturnType: nil | Type | boolean,
 }
 
--- TODO: This is needed in `isFunctionSubtypeOf` and should not be using `subtypingRelation` as that modifies types.
 local function instantiateGenericsAtCallsite(fn: Type, callsite: Type, applyBounds: boolean?): (Type, { Type }, { [Type]: Type }, { [Type]: { upper: Type, lower: Type } }?)
     local initialFn = fn
     log(`Trying to instantiate '{ typeToString(initialFn) }' with '{ typeToString(callsite) }'`)
@@ -2255,7 +2311,7 @@ local function instantiateGenericsAtCallsite(fn: Type, callsite: Type, applyBoun
 
     local concretizationResult = gatherFreeTypeSubstitutions(
         {
-            polarity = "Mixed",
+            polarity = "Negative",
             alwaysConcretize = true,
             bounds = bounds,
         },

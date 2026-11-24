@@ -552,11 +552,8 @@ test("incomplete type alias instantiation", function()
 end)
 
 test("recursive parameter bounds", function()
-    local result = check("function f(x, y) x = y y = x end")
-    expect(#result.errors).toBe(2)
-    expectType(result, "f")
-    -- TODO PROVISIONAL
-        .toBe("(t1, ('b <: t1)) -> ()\nwhere t1 = ('a <: ('b <: t1))")
+    expectType(requireNoErrors(check("function f(x, y) x = y y = x end")), "f")
+        .toBe("(unknown, unknown) -> ()")
 end)
 
 test("typeToString() negated", function()

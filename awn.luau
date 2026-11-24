@@ -928,7 +928,7 @@ local function normalizedNil()
 end
 
 local function normalizedBoolean(singleton: boolean?)
-    return normalize(if singleton == nil then nilType else singletonType(singleton))
+    return normalize(if singleton == nil then booleanType else singletonType(singleton))
 end
 
 local function normalizedString(singleton: string?)
@@ -940,9 +940,11 @@ local function checkBoundsConsistency(changes: { read RequiredBoundsChange }): {
     local stored = {}
 
     for _, change in changes do
+        assert(change.Target.Kind == "Free")
+
         local currently = stored[change.Target] or {
-            upper = change.IntersectUpperWith or unknownType,
-            lower = change.UnionLowerWith or neverType,
+            upper = change.IntersectUpperWith or change.Target.UpperBound,
+            lower = change.UnionLowerWith or change.Target.LowerBound,
         }
 
         if change.IntersectUpperWith then
@@ -1426,7 +1428,7 @@ local function isExactly(a: NormalizedType, b: NormalizedType): SubtypingResult
 
     return {
         holds = true,
-        errorSurpressing = r1.errorSurpressed or r2.errorSurpressed,
+        errorSurpressed = r1.errorSurpressed or r2.errorSurpressed,
         requiredBoundsChanges = boundsChanges,
     }
 end
@@ -2026,7 +2028,7 @@ type GatherFreeTypeSubstitutionsState = {
     inside: { [Type]: true? },
 }
 
-local function cleanSubstitution(ty: Type, sub: Type, polarity: Polarity)
+local function cleanSubstitution(ty: Type, sub: Type)
     if sub.Kind == "Free" then
         local here = sub
         local inside: { [Type]: true? } = {}
@@ -2884,13 +2886,10 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         log(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
 
-        local doCheck = true
         local erroneous, ftyToGeneric
         fnTy, erroneous, ftyToGeneric = instantiateGenericsAtCallsite(fnTy, callsiteTy)
 
         if #erroneous > 0 then
-            doCheck = false
-
             for _, free in erroneous do
                 local gen = ftyToGeneric[free]
                 assert(free.Kind == "Free")
@@ -2916,42 +2915,40 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         local failed = {}
 
+        for _, component in normFn.functions.components do
+            if #component.parameters ~= #arguments then
+                table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects { #component.parameters } argument(s).`)
+                continue
+            end
+
+            local boundsChanges = {}
+            local allOk = true
+
+            for i, param in component.parameters do
+                local result = isSubtypeOf(normalize(arguments[i]), param)
+
+                if result.holds then
+                    table.insert(boundsChanges, result.requiredBoundsChanges)
+                else
+                    table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects argument { i } to be '{ normalizationToString(param) }'.`)
+                    allOk = false
+                end
+            end
+
+            if allOk then
+                for _, changes in boundsChanges do
+                    applyBoundsChanges(changes)
+                end
+
+                return if component.returns then normalizationToType(component.returns) else nil
+            end
+        end
+
         if #normFn.functions.components == 1 then
-            if doCheck then
-                awn.check(fnTy, callsiteTy, expr.Position)
-            end
+            errorReport(failed[1], expr.Position)
 
-            local retTy = normFn.functions.components[1].returns
-            return if retTy then normalizationToType(retTy) else nil
-        else
-            for _, component in normFn.functions.components do
-                if #component.parameters ~= #arguments then
-                    table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects { #component.parameters } argument(s).`)
-                    continue
-                end
-
-                local boundsChanges = {}
-                local allOk = true
-
-                for i, param in component.parameters do
-                    local result = isSubtypeOf(normalize(arguments[i]), param)
-
-                    if result.holds then
-                        table.insert(boundsChanges, result.requiredBoundsChanges)
-                    else
-                        table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects argument { i } to be '{ normalizationToString(param) }'.`)
-                        allOk = false
-                    end
-                end
-
-                if allOk then
-                    for _, changes in boundsChanges do
-                        applyBoundsChanges(changes)
-                    end
-
-                    return if component.returns then normalizationToType(component.returns) else nil
-                end
-            end
+            local returns = normFn.functions.components[1].returns
+            return if returns then normalizationToType(returns) else nil
         end
 
         local function overloadResolutionFailed(normError)
@@ -3371,6 +3368,8 @@ local function dumpResults()
     for _, err: string in typeErrors do
         print(err)
     end
+
+    print("")
 
     for _, k in typeAssociationsOrdered do
         local t = localTypeAssociations[k]

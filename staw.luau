@@ -590,6 +590,7 @@ test("error isSubtypeOf() lists", function()
 end)
 
 --[=[
+-- TODO
 test("error isSubtypeOf() strings singletons missing negation", function()
     requireError(check([[
         let x: ~"hi" = nil
@@ -649,6 +650,15 @@ end)
 test("error negate() list", function()
     -- TODO PROVISIONAL
     expect(#check("type s = { nil } let x: ~s = valuenever").errors).toBe(3)
+end)
+
+test("id", function()
+    expectType(requireNoErrors(check("function id(x) return x end")), "id")
+        .toBe("<V>(V) -> V")
+end)
+
+test("error mismatch annotation", function()
+    requireError(check("function f(x: number) end f(true)"))
 end)
 
 local function runTests()

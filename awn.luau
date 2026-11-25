@@ -1006,8 +1006,10 @@ local function intersectApplicableReturns(components: { read NormalizedFunctionC
     local applicable = {}
 
     for _, c in components do
-        if #c.parameters == 1 and c.returns then
-            local result = awn.isSubtypeOf(argument, c.parameters[1])
+        local param = c.parameters[1] or c.variadic
+
+        if #c.parameters <= 1 and c.returns then
+            local result = awn.isSubtypeOf(argument, param)
 
             if result.holds then
                 applyBoundsChanges(result.requiredBoundsChanges)
@@ -2357,7 +2359,7 @@ local function instantiateGenericsAtCallsite(fn: Type, callsite: Type, applyBoun
     end
 
     local instantiation = awn.reduceTypeFunctions(substituteAllIn(fn, concretizationResult.substitutions, {}))
-    log(`Instantiation: '{ typeToString(initialFn) }' ~ '{ typeToString(callsite) }' => '{ typeToString(instantiation) }'{ if #erroneous > 0 then " (**erroneous**)" else "" }`)
+    log(`Instantiation: '{ typeToString(initialFn) }' ~ '{ typeToString(callsite) }' => '{ typeToString(instantiation) }'{ if #erroneous > 0 then " (**erroneous**)" else "" }\n`)
 
     return instantiation, erroneous, ftyToGeneric, bounds
 end
@@ -2968,9 +2970,9 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                     table.insert(boundsChanges, result.requiredBoundsChanges)
                 else
                     local signature = normalizedFunctionComponentToString(component)
-                    local expected = normalizationToString(component.variadic)
+                    local wanted = normalizationToString(component.variadic)
                     local got = typeToString(arguments[i])
-                    table.insert(failed, `'{ signature }' expects argument { i } to be '{ expected }', but got '{ got }'.`)
+                    table.insert(failed, `'{ signature }' expects argument { i } to be '{ wanted }', but got '{ got }'.`)
                     allOk = false
                 end
             end

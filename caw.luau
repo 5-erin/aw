@@ -410,7 +410,8 @@ local function nextToken(state: ParseState): Token
             before = state.Position.Offset
             c, state.Position.Offset = nextCharacter(state.Program, state.Position.Offset)
         until isSeparator(c)
-            or (symbols[token] and nextCharacter(state.Program, state.Position.Offset - 1) ~= ".")
+            -- TODO luau cast.
+            or (symbols[token :: any] and nextCharacter(state.Program, state.Position.Offset - 1) ~= ".")
             or (tonumber(token) and not tonumber(c) and c ~= ".")
 
         state.Position.Offset = before
@@ -454,7 +455,7 @@ local function nextToken(state: ParseState): Token
                 Value = strlit,
             },
         }
-    elseif symbols[token] then -- TODO luau cast (also not accurate)
+    elseif symbols[token :: any] then -- TODO luau cast.
         return tk{
             Type = token :: keyof<typeof(symbols)>
         }
@@ -539,8 +540,8 @@ local maybeCombineWithTypeOperator
 
 local function parseBinaryTypeOperator(state: ParseState, left: TypeAnnotation, opTk: Token): TypeAnnotation
     local combined: TypeAnnotation = {
-        -- TODO luau false positive type error when this is `"Union" | "Intersection"`
-        Kind = if opTk.Type == "|" then "Union" else "Intersection" :: "Union",
+        -- TODO luau cast.
+        Kind = if opTk.Type == "|" then "Union" else "Intersection" :: any,
         Components = { left, parseTypeAnnotation(state) },
     }
 
@@ -664,6 +665,7 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?, allowVariadic
                 Kind = "Function",
                 Generics = gens,
                 Parameters = func.Parameters,
+                Variadic = func.Variadic,
                 Returns = func.Returns,
             }
         else
@@ -687,10 +689,6 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?, allowVariadic
             if param.Kind == "Variadic" then
                 definitelyFunction = true
                 variadic = parseTypeAnnotation(state) -- `T` of `...T`.
-
-                if not variadic then
-                    break
-                end
 
                 parens, consumeParens = peekNextToken(state)
                 continue -- Must be at the end of the parameter list.

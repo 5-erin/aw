@@ -560,7 +560,7 @@ test("typeToString() negated", function()
     expectType(requireNoErrors(check("let x: simplify<~nil> = 1")), "x").toBe("~nil")
 end)
 
-test("error isExactly() r2", function()
+test("error isExactly() r1", function()
     requireError(check("let x: { number | nil } = valuenever let y: { number } = x"))
 end)
 

@@ -316,7 +316,8 @@ if select("#", ...) > 0 then
         elseif arg == "--ast" then
             printAst = true
         elseif arg == "--test" then
-            runTests()
+            local prefix = select(i + 1, ...)
+            runTests(prefix)
 
             return true
         elseif arg == "--help" then

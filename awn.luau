@@ -413,63 +413,60 @@ local function union(a: NormalizedType, b: NormalizedType): NormalizedType
 
     local strings = { cofinite = false, singletons = {} }
 
-    if not isStringNever(a.strings) and not isStringNever(b.strings) then
+    do
         local aStrings = a.strings
         local bStrings = b.strings
         local aSingles = aStrings.singletons
         local bSingles = bStrings.singletons
 
-        -- TODO luau cast.
-        if next(aSingles :: any) ~= nil and next(bSingles :: any) ~= nil then
+        -- `"a" | "b"`
+        if not aStrings.cofinite and not bStrings.cofinite then
             local singles: { [string]: true } = {}
 
-            -- TODO check
+            for s, _ in aSingles do
+                singles[s] = true
+            end
+
+            for s, _ in bSingles do
+                singles[s] = true
+            end
+
+            strings = { cofinite = false, singletons = singles }
+        -- `"a" | (string & ~"b")`
+        elseif aStrings.cofinite ~= bStrings.cofinite then
+            local singles: { [string]: true } = {}
+            local incl
+            local excl
+
+            if aStrings.cofinite then
+                excl = aSingles
+                incl = bSingles
+            else
+                excl = bSingles
+                incl = aSingles
+            end
+
+            for s, _ in excl do
+                if not incl[s] then
+                    singles[s] = true
+                end
+            end
+
+            strings = { cofinite = true, singletons = singles }
+        -- `(string & ~"a" & ~"b") | (string & ~"a" & ~"c")
+        else
+            -- `~"a" | ~"a"` == `~("a" & "a")` == `~"a"`
+            -- `~"a" | ~"b"` == `~("a" & "b") == `string` (recall our current top is `string`, not `unknown`.)
+            local singles: { [string]: true? } = {}
+
             for s, _ in aSingles do
                 if bSingles[s] then
-                    if bStrings.cofinite == aStrings.cofinite then
-                        if not aStrings.cofinite then
-                            singles[s] = true
-                        end
-                    end
-                else
                     singles[s] = true
                 end
             end
 
-            for s, _ in bSingles do
-                if aSingles[s] then
-                    if aStrings.cofinite == bStrings.cofinite then
-                        if not bStrings.cofinite then
-                            singles[s] = true
-                        end
-                    end
-                else
-                    singles[s] = true
-                end
-            end
-
-            strings = { cofinite = false, singletons = singles }
-        elseif not aStrings.cofinite and not bStrings.cofinite then
-            local singles: { [string]: true } = {}
-
-            for s, _ in aSingles do
-                singles[s] = true
-            end
-
-            for s, _ in bSingles do
-                singles[s] = true
-            end
-
-            strings = { cofinite = false, singletons = singles }
-        else
-            -- `"a" | string` and `string | "a"` => `string`
-            -- `(string & ~"a") | string` and `string | (string & | "a")` => `string`
-            strings = { cofinite = true, singletons = {} }
+            strings = { cofinite = true, singletons = singles }
         end
-    else
-        -- One is `never`.
-        strings = if isStringNever(a.strings) then b.strings
-                    else a.strings
     end
 
     local lists = nil
@@ -601,40 +598,57 @@ local function intersect(a: NormalizedType, b: NormalizedType, inside: { [Type]:
 
     local strings = { cofinite = false, singletons = {} }
 
-    if not isStringNever(a.strings) and not isStringNever(b.strings) then
+    do
         local aStrings = a.strings
         local bStrings = b.strings
         local aSingles = aStrings.singletons
         local bSingles = bStrings.singletons
 
-        local aHasSingles = next(aSingles :: any) ~= nil
-        local bHasSingles = next(bSingles :: any) ~= nil
+        -- ("hello" | "hi") & "hi"
+        if not aStrings.cofinite and not bStrings.cofinite then
+            local singles: { [string]: true? } = {}
 
-        -- TODO luau cast.
-        if aHasSingles and bHasSingles then
-            local singles: { [string]: true } = {}
-
-            if aStrings.cofinite == bStrings.cofinite then
-                for s, _ in aSingles do
-                    if bSingles[s] then
-                        singles[s] = true
-                    end
+            for s, _ in aSingles do
+                if bSingles[s] then
+                    singles[s] = true
                 end
-
-                strings = { cofinite = aStrings.cofinite, singletons = singles }
-            else
-                for s, _ in aSingles do
-                    if not bSingles[s] then
-                        singles[s] = true
-                    end
-                end
-
-                strings = { cofinite = aStrings.cofinite, singletons = singles }
             end
+
+            strings = { cofinite = false, singletons = singles }
+        -- ~"hello" & "hi"
+        elseif aStrings.cofinite and bStrings.cofinite then
+            local singles: { [string]: true? } = {}
+
+            for s, _ in aSingles do
+                singles[s] = true
+            end
+
+            for s, _ in bSingles do
+                singles[s] = true
+            end
+
+            strings = { cofinite = true, singletons = singles }
+        -- "hi" & ~"hello"
         else
-            strings = if aHasSingles then aStrings
-                        else if bHasSingles then bStrings
-                        else { cofinite = true, singletons = {} }
+            local singles: { [string]: true? } = {}
+            local incl
+            local excl
+
+            if aStrings.cofinite then
+                excl = aSingles
+                incl = bSingles
+            else
+                excl = bSingles
+                incl = aSingles
+            end
+
+            for s, _ in incl do
+                if not excl[s] then
+                    singles[s] = true
+                end
+            end
+
+            strings = { cofinite = false, singletons = singles }
         end
     end
 
@@ -2904,13 +2918,22 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
 
         local fnTy = fn.Type
         local arguments = table.create<<Type>>(#expr.Call.Arguments)
+        local variadic = neverType
 
         for i, a in expr.Call.Arguments do
-            local expect = (fnTy.Kind == "Function" and fnTy.Parameters[i]) or freeType()
-            arguments[i] = infer(state, a, expect)
+            if a.Type == "VariadicArguments" then
+                if state.Variadic then
+                    variadic = state.Variadic
+                else
+                    errorReport(`Cannot use '...' outside of functions.`, a.Position)
+                end
+            else
+                local expect = (fnTy.Kind == "Function" and fnTy.Parameters[i]) or freeType()
+                arguments[i] = infer(state, a, expect)
+            end
         end
 
-        local callsiteTy = functionType({}, arguments, neverType, expected)
+        local callsiteTy = functionType({}, arguments, variadic, expected)
 
         log(`{ expr.Position.Line }:{ expr.Position.Column }: Instantiating '{ typeToString(fnTy) }' with '{ typeToString(callsiteTy) }'`)
 

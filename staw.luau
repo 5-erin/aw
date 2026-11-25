@@ -653,19 +653,105 @@ test("error negate() list", function()
 end)
 
 test("id", function()
-    expectType(requireNoErrors(check("function id(x) return x end")), "id")
+    local result = requireNoErrors(check([[
+        function id(x)
+            return x
+        end
+
+        let y = id(5)
+    ]]))
+
+    expectType(result, "id")
         .toBe("<V>(V) -> V")
+    expectType(result, "y")
+        .toBe("number")
 end)
 
 test("error mismatch annotation", function()
     requireError(check("function f(x: number) end f(true)"))
 end)
 
-local function runTests()
+test("union() strings both noncofinite", function()
+    expectType(requireNoErrors(check([[
+        let x: simplify<"hello" | "hi" | "hello"> = "hi"
+    ]])), "x").toBe("\"hello\" | \"hi\"")
+end)
+
+test("union() strings mismatching", function()
+    local result = requireNoErrors(check([[
+        let x: simplify<"a" | (string & ~"a")> = "hello"
+        let y: simplify<"a" | (string & ~"b")> = "a"
+        let z: simplify<~"a" | "a"> = true
+        let x_: simplify<(string & ~"a") | "a"> = "hello"
+        let y_: simplify<(string & ~"b") | "a"> = "a"
+        let z_: simplify<"a" | ~"a"> = true
+    ]]))
+
+    expectType(result, "x").toBe("string")
+    expectType(result, "y").toBe("string & ~\"b\"")
+    expectType(result, "z").toBe("unknown")
+    expectType(result, "x_").toBe("string")
+    expectType(result, "y_").toBe("string & ~\"b\"")
+    expectType(result, "z_").toBe("unknown")
+end)
+
+test("union() strings both cofinite", function()
+    local result = requireNoErrors(check([[
+        let x: simplify<(string & ~"a") | (string & ~"a")> = "b"
+        let y: simplify<(string & ~"a") | (string & ~"b")> = "hello"
+        let z: simplify<(string & ~"a" & ~"b") | (string & ~"b" & ~"c")> = "hello"
+    ]]))
+
+    expectType(result, "x").toBe("string & ~\"a\"")
+    expectType(result, "y").toBe("string")
+    expectType(result, "z").toBe("string & ~\"b\"")
+end)
+
+test("intersect() strings both noncofinite", function()
+    local result = requireNoErrors(check([[
+        let x: simplify<("hello" | "hi") & "hi"> = "hi"
+        let y: simplify<"hi" & "hello"> = valuenever
+    ]]))
+
+    expectType(result, "x").toBe("\"hi\"")
+    expectType(result, "y").toBe("never")
+end)
+
+test("intersect() strings both cofinite", function()
+    expectType(requireNoErrors(check([[
+        let x: simplify<~"hello" & ~"hi"> = "bye"
+    ]])), "x").toBe("~(\"hello\" | \"hi\")")
+end)
+
+test("intersect() strings mismatching", function()
+    local result = requireNoErrors(check([[
+        let x: simplify<~"hello" & "hi"> = "hi"
+        let y: simplify<"hello" & ~"hi"> = "hello"
+        let z: simplify<"hi" & ~"hi"> = valuenever
+        let w: simplify<~"hi" & "hi"> = valuenever
+    ]]))
+
+    expectType(result, "x").toBe("\"hi\"")
+    expectType(result, "y").toBe("\"hello\"")
+    expectType(result, "z").toBe("never")
+    expectType(result, "w").toBe("never")
+end)
+
+local function runTests(prefix: string?)
+    if prefix then
+        print(`Running all tests with prefix "{ prefix }".\n`)
+    else
+        print(`Running all tests.\n`)
+    end
+
     local succeeded = 0
     local failed = 0
 
     for _, t in tests do
+        if prefix and string.find(t.name, prefix) ~= 1 then
+            continue
+        end
+
         local s, e = pcall(t.run)
 
         if s then

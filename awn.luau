@@ -146,7 +146,7 @@ export type NormalizedType = {
 }
 
 local function unreachable(x: never): never
-    error(`Unexpected branch with value '{ x }' ({ typeof(x) }), this is an internal error.`)
+    error(`Unexpected branch with value '{ x }' ({ typeof(x) }), this is an internal error.`, 2)
 end
 
 local function log(message: string)
@@ -1061,7 +1061,7 @@ end
 
 local function normalizedFunctionComponentToString(nfc: NormalizedFunctionComponentType): string
     local gensStrings = table.create<<string>>(#nfc.generics)
-    local paramStrings = table.create<<string>>(#nfc.parameters)
+    local paramStrings = table.create<<string>>(#nfc.parameters + 1)
 
     for i, gen in nfc.generics do
         gensStrings[i] = awn.typeToString(gen)
@@ -1069,6 +1069,10 @@ local function normalizedFunctionComponentToString(nfc: NormalizedFunctionCompon
 
     for i, param in nfc.parameters do
         paramStrings[i] = normalizationToString(param)
+    end
+
+    if not isNever(nfc.variadic) then
+        paramStrings[#nfc.parameters + 1] = `...{ normalizationToString(nfc.variadic) }`
     end
 
     local str = `({ table.concat(paramStrings, ", ") }) -> { if nfc.returns then normalizationToString(nfc.returns) else "()" }`
@@ -1111,7 +1115,7 @@ function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctio
     for i, cb in b.components do
         local singles = nil
 
-        if #cb.parameters == 1 then
+        if #cb.parameters == 1 and isNever(cb.variadic) then
             singles = decomposeToSingletons(cb.parameters[1])
         end
 
@@ -1141,7 +1145,7 @@ function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctio
             for ica, ca in a.components do
                 local signature = normalizedFunctionComponentToString(ca)
 
-                if #ca.parameters ~= #cb.parameters then
+                if #ca.parameters ~= #cb.parameters and isNever(ca.variadic) then
                     table.insert(failed, `'{ signature }' has a differing number of parameters.`)
                     continue
                 end
@@ -1185,8 +1189,9 @@ function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctio
                     continue
                 end
 
-                for i, param in ca.parameters do
-                    local paramResult = awn.isSupertypeOf(param, cb.parameters[i])
+                for i, bParam in cb.parameters do
+                    local param = ca.parameters[i] or ca.variadic
+                    local paramResult = awn.isSupertypeOf(param, bParam)
 
                     if paramResult.holds then
                         -- TODO luau cast.
@@ -1197,6 +1202,24 @@ function awn.isFunctionSubtypeOf(a: NormalizedFunctionType, b: NormalizedFunctio
                             failed,
                             `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" }`
                                 .. ` does not accept parameter #{ i } '{ paramStr }': { paramResult.failedPath }`
+                        )
+
+                        paramsMatched = false
+                    end
+                end
+
+                if #cb.parameters == 0 then
+                    local variadicResult = awn.isSupertypeOf(ca.variadic, cb.variadic)
+
+                    if variadicResult.holds then
+                        -- TODO luau cast.
+                        table.move(variadicResult.requiredBoundsChanges, 1, #variadicResult.requiredBoundsChanges, #requiredChanges + 1, requiredChanges :: any)
+                    else
+                        local paramStr = normalizationToString(cb.variadic)
+                        table.insert(
+                            failed,
+                            `'{ signature }'{ if instantiate then " (instantiation of '" .. nonInstantiated .. "')" else "" }`
+                                .. ` does not accept variadics '...{ paramStr }': { variadicResult.failedPath }`
                         )
 
                         paramsMatched = false
@@ -2382,12 +2405,13 @@ local function typeAnnotationToType_(position: caw.Position, annotation: caw.Typ
         end
 
         local params = table.create<<Type>>(#annotation.Parameters)
+        local variadic = if annotation.Variadic then typeAnnotationToType_(position, annotation.Variadic) else neverType
 
         for i, param in annotation.Parameters do
             params[i] = typeAnnotationToType_(position, param)
         end
 
-        return functionType(gens, params, neverType, if annotation.Returns then typeAnnotationToType_(position, annotation.Returns) else nil)
+        return functionType(gens, params, variadic, if annotation.Returns then typeAnnotationToType_(position, annotation.Returns) else nil)
 
     elseif annotation.Kind == "AliasInstantiation" then
         local arguments = table.create<<Type>>(#annotation.Arguments)
@@ -2418,6 +2442,8 @@ local function typeAnnotationToType_(position: caw.Position, annotation: caw.Typ
         end
 
         return intersectionType(components)
+    elseif annotation.Kind == "Variadic" then
+        return errorReport(`Internal error: Unexpected '...'.`, position)
     else
         unreachable(annotation.Kind)
         error(`Unreachable.`)
@@ -2916,7 +2942,7 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
         local failed = {}
 
         for _, component in normFn.functions.components do
-            if #component.parameters ~= #arguments then
+            if #component.parameters ~= #arguments and isNever(component.variadic) then
                 table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects { #component.parameters } argument(s).`)
                 continue
             end
@@ -2931,6 +2957,20 @@ local function infer(state: InferenceState, expr: caw.Expression, expected: Type
                     table.insert(boundsChanges, result.requiredBoundsChanges)
                 else
                     table.insert(failed, `'{ normalizedFunctionComponentToString(component) }' expects argument { i } to be '{ normalizationToString(param) }'.`)
+                    allOk = false
+                end
+            end
+
+            for i = #component.parameters + 1, #arguments do
+                local result = isSubtypeOf(normalize(arguments[i]), component.variadic)
+
+                if result.holds then
+                    table.insert(boundsChanges, result.requiredBoundsChanges)
+                else
+                    local signature = normalizedFunctionComponentToString(component)
+                    local expected = normalizationToString(component.variadic)
+                    local got = typeToString(arguments[i])
+                    table.insert(failed, `'{ signature }' expects argument { i } to be '{ expected }', but got '{ got }'.`)
                     allOk = false
                 end
             end

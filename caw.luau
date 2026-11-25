@@ -161,6 +161,7 @@ type FunctionTypeAnnotation = {
     read Kind: "Function",
     read Generics: { read GenericTypeAnnotation },
     read Parameters: { read TypeAnnotation },
+    read Variadic: TypeAnnotation?,
     read Returns: TypeAnnotation?,
 }
 
@@ -183,6 +184,10 @@ type UnionTypeAnnotation = {
 type IntersectionTypeAnnotation = {
     read Kind: "Intersection",
     read Components: { read TypeAnnotation },
+}
+
+type VariadicTypeAnnotation = {
+    read Kind: "Variadic",
 }
 
 export type TypeAnnotation =
@@ -404,7 +409,9 @@ local function nextToken(state: ParseState): Token
             token ..= c
             before = state.Position.Offset
             c, state.Position.Offset = nextCharacter(state.Program, state.Position.Offset)
-        until isSeparator(c) or (tonumber(token) and not tonumber(c) and c ~= ".")
+        until isSeparator(c)
+            or (symbols[token] and nextCharacter(state.Program, state.Position.Offset - 1) ~= ".")
+            or (tonumber(token) and not tonumber(c) and c ~= ".")
 
         state.Position.Offset = before
     end
@@ -574,8 +581,14 @@ local function parseGenericParameterList(state: ParseState): { read GenericTypeA
     return gens
 end
 
-function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotation
-    local annotation = nextToken(state)
+function parseTypeAnnotation(state: ParseState, shallow: boolean?, allowVariadic: boolean?): TypeAnnotation
+    local annotation, consumeAnnotation = peekNextToken(state)
+
+    -- Prevents excessive parse errors with e.g. "let x: (...) -> ()".
+    if annotation.Type ~= ")" then
+        consumeAnnotation()
+    end
+
     local ty: TypeAnnotation? = nil
 
     if annotation.Type == "Identifier" then
@@ -659,6 +672,7 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
 
     elseif annotation.Type == "(" then
         local params = {}
+        local variadic = nil
         local definitelyFunction = false
         local parens, consumeParens = peekNextToken(state)
 
@@ -668,7 +682,22 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
                 return { Kind = "Error" }
             end
 
-            table.insert(params, parseTypeAnnotation(state))
+            local param = parseTypeAnnotation(state, nil, true)
+
+            if param.Kind == "Variadic" then
+                definitelyFunction = true
+                variadic = parseTypeAnnotation(state) -- `T` of `...T`.
+
+                if not variadic then
+                    break
+                end
+
+                parens, consumeParens = peekNextToken(state)
+                continue -- Must be at the end of the parameter list.
+            else
+                table.insert(params, param)
+            end
+
             parens, consumeParens = peekNextToken(state)
 
             if parens.Type == "," then
@@ -694,6 +723,7 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
                 Kind = "Function",
                 Generics = {},
                 Parameters = params,
+                Variadic = variadic,
                 Returns = returns,
             }
         -- `(T, U)` is not a valid annotation,
@@ -715,6 +745,12 @@ function parseTypeAnnotation(state: ParseState, shallow: boolean?): TypeAnnotati
             Kind = "List",
             Items = itemTy,
         }
+    elseif annotation.Type == "..." then
+        if allowVariadic then
+            ty = { Kind = "Variadic" }
+        else
+            state.Report(`Unexpected '...', it is only valid in function parameter lists.`, annotation)
+        end
     else
         state.Report(`Expected annotation, got '{ tokenToString(annotation) }'.`, annotation)
     end
@@ -1189,8 +1225,11 @@ function parseExpression(state: ParseState, precedence: number?): Expression?
         end
     elseif token.Type == "(" then
         local inner = parseExpression(state)
-        local parentheses = nextToken(state)
-        assert(parentheses.Type == ")", `Expected closing parentheses, got '{ tokenToString(parentheses) }'`)
+        local closeParentheses = nextToken(state)
+
+        if closeParentheses.Type ~= ")" then
+            state.Report(`Expected closing parentheses, got '{ tokenToString(closeParentheses) }'`, closeParentheses)
+        end
 
         return inner
 
